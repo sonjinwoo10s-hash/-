@@ -1,0 +1,6 @@
+{
+  "name": "رفيق المسلم",
+  "description": "تطبيق إسلامي شامل لمواقيت الصلاة، القرآن الكريم والتفسير الميسر، الأذكار والسبحة الإلكترونية، الأربعين النووية، واتجاه القبلة.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,24 @@
+<resources>
+    <string name="app_name">رفيق المسلم</string>
+    <string name="nav_home">الرئيسية</string>
+    <string name="nav_quran">القرآن</string>
+    <string name="nav_azkar">الأذكار</string>
+    <string name="nav_hadith">الحديث</string>
+    <string name="nav_tools">المزيد</string>
+    <string name="toggle_dark_mode">تبديل الوضع الليلي</string>
+    <string name="refresh_prayers">تحديث مواقيت الصلاة</string>
+    <string name="next_prayer">الصلاة القادمة</string>
+    <string name="time_remaining">الوقت المتبقي</string>
+    <string name="daily_worship">وردي اليومي</string>
+    <string name="daily_inspiration">إلهام اليوم</string>
+    <string name="verse_of_day">آية اليوم</string>
+    <string name="hadith_of_day">حديث اليوم</string>
+    <string name="copy">نسخ</string>
+    <string name="share">مشاركة</string>
+    <string name="continue_reading">متابعة القراءة من حيث توقفت</string>
+    <string name="search_surah_hint">ابحث باسم السورة أو رقمها...</string>
+    <string name="search_hadith_hint">ابحث في متن الحديث أو الراوي أو الشرح...</string>
+    <string name="qibla_direction">اتجاه القبلة</string>
+    <string name="worship_guides">أدلة العبادات الميسّرة</string>
+    <string name="app_settings">إعدادات التطبيق</string>
+</resources>
