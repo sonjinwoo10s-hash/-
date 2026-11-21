@@ -8,6 +8,7 @@ import android.media.RingtoneManager
 import android.media.ToneGenerator
 import com.example.data.model.FajrAlarmSound
 import com.example.data.model.MuezzinItem
+import com.example.data.repository.MuezzinRepository
 import com.example.util.VibrationHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -34,10 +35,14 @@ class FajrAlarmPlayer(
 
         when (sound) {
             FajrAlarmSound.FAJR_ADHAN -> {
+                val cachedMp3 = MuezzinRepository.getCachedAdhanFile(context, fajrMuezzin.id)
                 val sources = buildList {
                     val localPath = fajrMuezzin.localFilePath
                     if (!localPath.isNullOrBlank() && File(localPath).exists()) {
                         add(localPath)
+                    } else if (cachedMp3.exists() && cachedMp3.length() > 0L) {
+                        add(cachedMp3.absolutePath)
+                        if (fajrMuezzin.primaryUrl.isNotBlank()) add(fajrMuezzin.primaryUrl)
                     } else {
                         if (fajrMuezzin.primaryUrl.isNotBlank()) add(fajrMuezzin.primaryUrl)
                         addAll(fajrMuezzin.fallbackUrls)

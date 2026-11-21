@@ -309,141 +309,6 @@ object HadithLibraryData {
         )
     )
 
-    val qudsiOffline: List<LibraryHadith> = listOf(
-        LibraryHadith(
-            uid = "qudsi_1",
-            book = HadithBookCollection.QUDSI,
-            number = 1,
-            chapter = HadithChapters.TAWBAH,
-            title = "إن رحمتي تغلب غضبي",
-            narrator = "عن أبي هريرة رضي الله عنه",
-            text = "قَالَ رَسُولُ اللَّهِ ﷺ: لَمَّا قَضَى اللَّهُ الخَلْقَ كَتَبَ فِي كِتَابِهِ فَهُوَ عِنْدَهُ فَوْقَ العَرْشِ: إِنَّ رَحْمَتِي غَلَبَتْ غَضَبِي.",
-            explanation = "بشارة عظيمة للمؤمنين بأن رحمة الله واسعة غالبة على كل شيء.",
-            source = "الأحاديث القدسية • متفق عليه"
-        ),
-        LibraryHadith(
-            uid = "qudsi_2",
-            book = HadithBookCollection.QUDSI,
-            number = 2,
-            chapter = HadithChapters.ZIKR,
-            title = "أنا عند ظن عبدي بي",
-            narrator = "عن أبي هريرة رضي الله عنه",
-            text = "يَقُولُ اللَّهُ تَعَالَى: أَنَا عِنْدَ ظَنِّ عَبْدِي بِي، وَأَنَا مَعَهُ إِذَا ذَكَرَنِي، فَإِنْ ذَكَرَنِي فِي نَفْسِهِ ذَكَرْتُهُ فِي نَفْسِي، وَإِنْ ذَكَرَنِي فِي مَلَإٍ ذَكَرْتُهُ فِي مَلَإٍ خَيْرٍ مِنْهُمْ، وَإِنْ تَقَرَّبَ إِلَيَّ بِشِبْرٍ تَقَرَّبْتُ إِلَيْهِ ذِرَاعًا.",
-            explanation = "حثٌّ على حسن الظن بالله والإكثار من ذكره والتقرب إليه بالطاعات.",
-            source = "الأحاديث القدسية • متفق عليه"
-        ),
-        LibraryHadith(
-            uid = "qudsi_3",
-            book = HadithBookCollection.QUDSI,
-            number = 3,
-            chapter = HadithChapters.AKHLAQ,
-            title = "تحريم الظلم",
-            narrator = "عن أبي ذر الغفاري رضي الله عنه",
-            text = "يَا عِبَادِي إِنِّي حَرَّمْتُ الظُّلْمَ عَلَى نَفْسِي وَجَعَلْتُهُ بَيْنَكُمْ مُحَرَّمًا فَلَا تَظَالَمُوا، يَا عِبَادِي كُلُّكُمْ ضَالٌّ إِلَّا مَنْ هَدَيْتُهُ فَاسْتَهْدُونِي أَهْدِكُمْ، يَا عِبَادِي كُلُّكُمْ جَائِعٌ إِلَّا مَنْ أَطْعَمْتُهُ فَاسْتَطْعِمُونِي أُطْعِمْكُمْ.",
-            explanation = "من أعظم الأحاديث القدسية في النهي عن الظلم والافتقار التام إلى الله وحده.",
-            source = "الأحاديث القدسية • رواه مسلم"
-        ),
-        LibraryHadith(
-            uid = "qudsi_4",
-            book = HadithBookCollection.QUDSI,
-            number = 4,
-            chapter = HadithChapters.TAWBAH,
-            title = "سعة مغفرة الله لمن لا يشرك به",
-            narrator = "عن أنس بن مالك رضي الله عنه",
-            text = "قَالَ اللَّهُ تَبَارَكَ وَتَعَالَى: يَا ابْنَ آدَمَ إِنَّكَ مَا دَعَوْتَنِي وَرَجَوْتَنِي غَفَرْتُ لَكَ عَلَى مَا كَانَ فِيكَ وَلَا أُبَالِي، يَا ابْنَ آدَمَ لَوْ بَلَغَتْ ذُنُوبُكَ عَنَانَ السَّمَاءِ ثُمَّ اسْتَغْفَرْتَنِي غَفَرْتُ لَكَ وَلَا أُبَالِي.",
-            explanation = "فتح أبواب الأمل والرجاء في مغفرة الله بالتوحيد والدعاء والاستغفار.",
-            source = "الأحاديث القدسية • رواه الترمذي"
-        ),
-        LibraryHadith(
-            uid = "qudsi_5",
-            book = HadithBookCollection.QUDSI,
-            number = 5,
-            chapter = HadithChapters.SALAH,
-            title = "قسمت الصلاة بيني وبين عبدي نصفين",
-            narrator = "عن أبي هريرة رضي الله عنه",
-            text = "قَالَ اللَّهُ تَعَالَى: قَسَمْتُ الصَّلَاةَ بَيْنِي وَبَيْنَ عَبْدِي نِصْفَيْنِ وَلِعَبْدِي مَا سَأَلَ، فَإِذَا قَالَ العَبْدُ: الحَمْدُ لِلَّهِ رَبِّ العَالَمِينَ، قَالَ اللَّهُ تَعَالَى: حَمِدَنِي عَبْدِي، وَإِذَا قَالَ: الرَّحْمَنِ الرَّحِيمِ، قَالَ اللَّهُ تَعَالَى: أَثْنَى عَلَيَّ عَبْدِي.",
-            explanation = "سورة الفاتحة مناجاة حقيقية بين العبد وربه في كل ركعة من الصلاة.",
-            source = "الأحاديث القدسية • رواه مسلم"
-        ),
-        LibraryHadith(
-            uid = "qudsi_6",
-            book = HadithBookCollection.QUDSI,
-            number = 6,
-            chapter = HadithChapters.SIYAM,
-            title = "الصوم لي وأنا أجزي به",
-            narrator = "عن أبي هريرة رضي الله عنه",
-            text = "قَالَ اللَّهُ عَزَّ وَجَلَّ: كُلُّ عَمَلِ ابْنِ آدَمَ لَهُ إِلَّا الصِّيَامَ فَإِنَّهُ لِي وَأَنَا أَجْزِي بِهِ، وَالصِّيَامُ جُنَّةٌ، وَلَخُلُوفُ فَمِ الصَّائِمِ أَطْيَبُ عِنْدَ اللَّهِ مِنْ رِيحِ المِسْكِ.",
-            explanation = "إضافة الصيام إلى الله تشريفاً له لأنه سرٌّ خالص بين العبد وربه.",
-            source = "الأحاديث القدسية • متفق عليه"
-        ),
-        LibraryHadith(
-            uid = "qudsi_7",
-            book = HadithBookCollection.QUDSI,
-            number = 7,
-            chapter = HadithChapters.IMAN,
-            title = "التقرب إلى الله بالفرائض والنوافل",
-            narrator = "عن أبي هريرة رضي الله عنه",
-            text = "إِنَّ اللَّهَ قَالَ: مَنْ عَادَى لِي وَلِيًّا فَقَدْ آذَنْتُهُ بِالحَرْبِ، وَمَا تَقَرَّبَ إِلَيَّ عَبْدِي بِشَيْءٍ أَحَبَّ إِلَيَّ مِمَّا افْتَرَضْتُ عَلَيْهِ، وَمَا يَزَالُ عَبْدِي يَتَقَرَّبُ إِلَيَّ بِالنَّوَافِلِ حَتَّى أُحِبَّهُ.",
-            explanation = "الطريق إلى محبة الله وولايته يبدأ بأداء الفرائض والمداومة على النوافل.",
-            source = "الأحاديث القدسية • رواه البخاري"
-        ),
-        LibraryHadith(
-            uid = "qudsi_8",
-            book = HadithBookCollection.QUDSI,
-            number = 8,
-            chapter = HadithChapters.ZIKR,
-            title = "نزول الرب في الثلث الأخير من الليل",
-            narrator = "عن أبي هريرة رضي الله عنه",
-            text = "يَنْزِلُ رَبُّنَا تَبَارَكَ وَتَعَالَى كُلَّ لَيْلَةٍ إِلَى السَّمَاءِ الدُّنْيَا حِينَ يَبْقَى ثُلُثُ اللَّيْلِ الآخِرُ يَقُولُ: مَنْ يَدْعُونِي فَأَسْتَجِيبَ لَهُ، مَنْ يَسْأَلُنِي فَأُعْطِيَهُ، مَنْ يَسْتَغْفِرُنِي فَأَغْفِرَ لَهُ.",
-            explanation = "فضل قيام الليل والأسحار قبل الفجر واستجابة الدعاء فيها.",
-            source = "الأحاديث القدسية • متفق عليه"
-        ),
-        LibraryHadith(
-            uid = "qudsi_9",
-            book = HadithBookCollection.QUDSI,
-            number = 9,
-            chapter = HadithChapters.AKHLAQ,
-            title = "أنفق يا ابن آدم أنفق عليك",
-            narrator = "عن أبي هريرة رضي الله عنه",
-            text = "قَالَ اللَّهُ تَبَارَكَ وَتَعَالَى: يَا ابْنَ آدَمَ أَنْفِقْ أُنْفِقْ عَلَيْكَ.",
-            explanation = "وعد إلهي كريم بالخلف والبركة لكل من ينفق في وجوه الخير والصدقة.",
-            source = "الأحاديث القدسية • متفق عليه"
-        ),
-        LibraryHadith(
-            uid = "qudsi_10",
-            book = HadithBookCollection.QUDSI,
-            number = 10,
-            chapter = HadithChapters.IMAN,
-            title = "أعددت لعبادي الصالحين ما لا عين رأت",
-            narrator = "عن أبي هريرة رضي الله عنه",
-            text = "قَالَ اللَّهُ عَزَّ وَجَلَّ: أَعْدَدْتُ لِعِبَادِيَ الصَّالِحِينَ مَا لَا عَيْنٌ رَأَتْ، وَلَا أُذُنٌ سَمِعَتْ، وَلَا خَطَرَ عَلَى قَلْبِ بَشَرٍ.",
-            explanation = "وصف نعيم الجنة الذي يفوق كل خيال بشري ترغيباً في العمل الصالح.",
-            source = "الأحاديث القدسية • متفق عليه"
-        ),
-        LibraryHadith(
-            uid = "qudsi_11",
-            book = HadithBookCollection.QUDSI,
-            number = 11,
-            chapter = HadithChapters.AKHLAQ,
-            title = "المتحابون في جلال الله",
-            narrator = "عن معاذ بن جبل رضي الله عنه",
-            text = "قَالَ اللَّهُ عَزَّ وَجَلَّ: المُتَحَابُّونَ فِي جَلَالِي لَهُمْ مَنَابِرُ مِنْ نُورٍ يَغْبِطُهُمُ النَّبِيُّونَ وَالشُّهَدَاءُ.",
-            explanation = "عظيم مكانة الأخوة الصادقة والمحبة الخالصة لوجه الله تعالى.",
-            source = "الأحاديث القدسية • رواه الترمذي"
-        ),
-        LibraryHadith(
-            uid = "qudsi_12",
-            book = HadithBookCollection.QUDSI,
-            number = 12,
-            chapter = HadithChapters.TAWBAH,
-            title = "أذنب عبد ذنباً فاستغفر",
-            narrator = "عن أبي هريرة رضي الله عنه",
-            text = "أَذْنَبَ عَبْدٌ ذَنْبًا فَقَالَ: اللَّهُمَّ اغْفِرْ لِي ذَنْبِي، فَقَالَ تَبَارَكَ وَتَعَالَى: أَذْنَبَ عَبْدِي ذَنْبًا، فَعَلِمَ أَنَّ لَهُ رَبًّا يَغْفِرُ الذَّنْبَ وَيَأْخُذُ بِالذَّنْبِ، قَدْ غَفَرْتُ لِعَبْدِي.",
-            explanation = "لا ييأس المسلم من رحمة الله مهما تكرر الخطأ ما دام يجدد التوبة والإنابة.",
-            source = "الأحاديث القدسية • متفق عليه"
-        )
-    )
-
     fun nawawiOffline(): List<LibraryHadith> {
         return OfflineIslamicData.hadiths.map { h ->
             val mappedChapter = when (h.category) {
@@ -462,15 +327,15 @@ object HadithLibraryData {
                 narrator = h.narrator,
                 text = h.text,
                 explanation = h.explanation,
-                source = "الأربعين النووية • ${h.source}"
+                source = "الأربعون النووية • حديث رقم ${h.id}"
             )
         }
     }
 
     fun offlineForBook(book: HadithBookCollection): List<LibraryHadith> = when (book) {
+        HadithBookCollection.NAWAWI -> nawawiOffline()
         HadithBookCollection.BUKHARI -> bukhariOffline
         HadithBookCollection.MUSLIM -> muslimOffline
-        HadithBookCollection.QUDSI -> qudsiOffline
-        HadithBookCollection.NAWAWI -> nawawiOffline()
+        else -> emptyList()
     }
 }

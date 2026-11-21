@@ -34,7 +34,8 @@ data class PrayerTimesUiState(
 data class WorshipTask(
     val id: String,
     val label: String,
-    val completed: Boolean = false
+    val completed: Boolean = false,
+    val isLockedFuture: Boolean = false
 )
 
 data class DailyQuote(
@@ -48,7 +49,8 @@ data class SurahSummary(
     val name: String,
     val englishName: String = "",
     val numberOfAyahs: Int,
-    val revelationType: String
+    val revelationType: String,
+    val startPage: Int = 1
 )
 
 data class AyahItem(
@@ -80,7 +82,8 @@ enum class AyahRepeatMode(val arabicLabel: String, val repeatCount: Int) {
 data class QuranBookmark(
     val surahNumber: Int,
     val surahName: String,
-    val ayahNumber: Int
+    val ayahNumber: Int,
+    val pageNumber: Int = 1
 )
 
 @JsonClass(generateAdapter = true)
@@ -97,9 +100,9 @@ data class MoshafOption(
     }
 
     fun buildSurahUrl(surahNumber: Int): String {
-        val padded = surahNumber.toString().padStart(3, '0')
+        val safeSurah = surahNumber.coerceIn(1, 114)
         val normalizedBase = if (server.endsWith("/")) server else "$server/"
-        return "$normalizedBase$padded.mp3"
+        return normalizedBase + String.format(java.util.Locale.US, "%03d.mp3", safeSurah)
     }
 }
 
@@ -114,26 +117,27 @@ data class ReciterOption(
     val isFeatured: Boolean = false
 ) {
     fun buildPrimaryAudioUrl(surahNumber: Int): String {
-        val padded = surahNumber.toString().padStart(3, '0')
+        val safeSurah = surahNumber.coerceIn(1, 114)
         val normalizedBase = if (serverUrl.endsWith("/")) serverUrl else "$serverUrl/"
-        return "$normalizedBase$padded.mp3"
+        return normalizedBase + String.format(java.util.Locale.US, "%03d.mp3", safeSurah)
     }
 
     fun buildCandidateAudioUrls(surahNumber: Int): List<String> {
-        val padded = surahNumber.toString().padStart(3, '0')
+        val safeSurah = surahNumber.coerceIn(1, 114)
+        val padded = String.format(java.util.Locale.US, "%03d", safeSurah)
         return buildList {
             if (serverUrl.isNotBlank()) {
-                add(buildPrimaryAudioUrl(surahNumber))
+                add(buildPrimaryAudioUrl(safeSurah))
             }
             if (!fallbackUrlTemplate.isNullOrBlank()) {
                 add(
                     fallbackUrlTemplate
-                        .replace("{surah}", surahNumber.toString())
+                        .replace("{surah}", safeSurah.toString())
                         .replace("{padded}", padded)
                 )
             }
             // Verified CDN fallback
-            add("https://cdn.islamic.network/quran/audio-surah/128/ar.alafasy/$surahNumber.mp3")
+            add("https://cdn.islamic.network/quran/audio-surah/128/ar.alafasy/$safeSurah.mp3")
         }.distinct()
     }
 }

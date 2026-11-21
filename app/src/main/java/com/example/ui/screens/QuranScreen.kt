@@ -99,6 +99,8 @@ import com.example.data.model.QuranBookmark
 import com.example.data.model.QuranViewMode
 import com.example.data.model.ReciterOption
 import com.example.data.model.SurahSummary
+import com.example.data.repository.MushafPageAyah
+import com.example.data.repository.TafsirBook
 import com.example.ui.theme.AmiriFontFamily
 import com.example.ui.theme.AmiriQuranFontFamily
 import com.example.ui.theme.DeepGreen
@@ -106,6 +108,8 @@ import com.example.ui.theme.EmeraldGreen
 import com.example.ui.theme.LocalIslamicColors
 import com.example.ui.theme.SoftGold
 import com.example.ui.viewmodel.QuranUiState
+import com.example.ui.viewmodel.TafsirUiState
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Locale
 
@@ -114,12 +118,23 @@ fun QuranScreen(
     state: QuranUiState,
     fontSizeSp: Float,
     paperTheme: MushafPaperTheme,
+    tajweedColorsEnabled: Boolean,
     bookmark: QuranBookmark?,
     audioState: AudioPlayerState,
     ayahAudioState: AyahAudioState,
+    tafsirState: TafsirUiState,
     onSearchChange: (String) -> Unit,
     onFilterChange: (String) -> Unit,
     onOpenSurah: (SurahSummary) -> Unit,
+    onOpenMushafLastPage: () -> Unit,
+    onOpenMushafPage: (Int) -> Unit,
+    onMushafPageChanged: (Int) -> Unit,
+    onRetryOfflineMushaf: () -> Unit,
+    onToggleMushafNightMode: () -> Unit,
+    onToggleTajweedColors: () -> Unit,
+    onSaveMushafPageBookmark: (Int, Int, String, Int) -> Unit,
+    onPlaySingleAyahOnly: (MushafPageAyah) -> Unit,
+    onPlayFromPageAyah: (MushafPageAyah) -> Unit,
     onPlaySurahFromList: (SurahSummary) -> Unit,
     onOpenReciterLibrary: () -> Unit,
     onRetryReader: () -> Unit,
@@ -134,54 +149,67 @@ fun QuranScreen(
     onToggleAudio: () -> Unit,
     onSelectReciter: (ReciterOption) -> Unit,
     onSeekAudio: (Float) -> Unit,
+    onSelectPlaybackSpeed: (Float) -> Unit,
+    onToggleWordByWord: (Boolean) -> Unit,
+    onSyncLatencyOffsetChange: (Int) -> Unit,
+    onTapSeekWordOrAyah: (Int, Int, Int?) -> Boolean,
     onDownloadMp3: () -> Unit,
     onTogglePlaySingleAyah: (AyahItem) -> Unit,
     onStopSingleAyah: () -> Unit,
     onSelectAyahRepeatMode: (AyahRepeatMode) -> Unit,
     onToggleAyahContinueReading: (Boolean) -> Unit,
+    onOpenAyahTafsir: (Int, Int) -> Unit,
+    onSelectTafsirBook: (TafsirBook) -> Unit,
+    onRetryTafsir: () -> Unit,
+    onDownloadTafsirBook: (TafsirBook) -> Unit,
     onShowToast: (String) -> Unit
 ) {
-    if (state.activeSurah != null) {
-        BackHandler {
-            if (state.isFullScreenReading) {
-                onToggleFullScreenReading()
-            } else {
-                onCloseReader()
-            }
-        }
-        SurahReaderView(
+    if (state.isMushafOpen) {
+        WahyMushafReaderScreen(
             state = state,
             fontSizeSp = fontSizeSp,
             paperTheme = paperTheme,
+            tajweedColorsEnabled = tajweedColorsEnabled,
             bookmark = bookmark,
             audioState = audioState,
             ayahAudioState = ayahAudioState,
-            onClose = onCloseReader,
-            onRetry = onRetryReader,
+            tafsirState = tafsirState,
+            onCloseMushaf = onCloseReader,
+            onRetryOfflineLoad = onRetryOfflineMushaf,
+            onPageChanged = onMushafPageChanged,
             onFontSizeChange = onFontSizeChange,
-            onSelectViewMode = onSelectViewMode,
-            onSelectPaperTheme = onSelectPaperTheme,
-            onToggleFullScreenReading = onToggleFullScreenReading,
-            onToggleAllTafsir = onToggleAllTafsir,
-            onToggleAyahTafsir = onToggleAyahTafsir,
-            onSaveBookmark = onSaveBookmark,
-            onToggleAudio = onToggleAudio,
+            onToggleNightMode = onToggleMushafNightMode,
+            onToggleTajweedColors = onToggleTajweedColors,
+            onSavePageBookmark = onSaveMushafPageBookmark,
+            onToggleSurahAudio = onToggleAudio,
             onOpenReciterLibrary = onOpenReciterLibrary,
             onSeekAudio = onSeekAudio,
+            onSelectPlaybackSpeed = onSelectPlaybackSpeed,
+            onToggleWordByWord = onToggleWordByWord,
+            onSyncLatencyOffsetChange = onSyncLatencyOffsetChange,
+            onTapSeekWordOrAyah = onTapSeekWordOrAyah,
             onDownloadMp3 = onDownloadMp3,
-            onTogglePlaySingleAyah = onTogglePlaySingleAyah,
+            onPlaySingleAyahOnly = onPlaySingleAyahOnly,
+            onPlayFromPageAyah = onPlayFromPageAyah,
             onStopSingleAyah = onStopSingleAyah,
             onSelectAyahRepeatMode = onSelectAyahRepeatMode,
             onToggleAyahContinueReading = onToggleAyahContinueReading,
+            onOpenAyahTafsir = onOpenAyahTafsir,
+            onSelectTafsirBook = onSelectTafsirBook,
+            onRetryTafsir = onRetryTafsir,
+            onDownloadTafsirBook = onDownloadTafsirBook,
             onShowToast = onShowToast
         )
     } else {
         SurahListView(
             state = state,
+            bookmark = bookmark,
             audioState = audioState,
             onSearchChange = onSearchChange,
             onFilterChange = onFilterChange,
             onOpenSurah = onOpenSurah,
+            onOpenMushafLastPage = onOpenMushafLastPage,
+            onOpenMushafPage = onOpenMushafPage,
             onPlaySurahFromList = onPlaySurahFromList,
             onSelectReciter = onSelectReciter,
             onOpenReciterLibrary = onOpenReciterLibrary
@@ -192,15 +220,26 @@ fun QuranScreen(
 @Composable
 private fun SurahListView(
     state: QuranUiState,
+    bookmark: QuranBookmark?,
     audioState: AudioPlayerState,
     onSearchChange: (String) -> Unit,
     onFilterChange: (String) -> Unit,
     onOpenSurah: (SurahSummary) -> Unit,
+    onOpenMushafLastPage: () -> Unit,
+    onOpenMushafPage: (Int) -> Unit,
     onPlaySurahFromList: (SurahSummary) -> Unit,
     onSelectReciter: (ReciterOption) -> Unit,
     onOpenReciterLibrary: () -> Unit
 ) {
     val islamic = LocalIslamicColors.current
+    var localSearchQuery by remember { mutableStateOf(state.searchQuery) }
+    LaunchedEffect(localSearchQuery) {
+        delay(300L)
+        if (localSearchQuery != state.searchQuery) {
+            onSearchChange(localSearchQuery)
+        }
+    }
+
     val normalizedQuery = remember(state.searchQuery) {
         OfflineIslamicData.normalizeArabic(state.searchQuery)
     }
@@ -221,6 +260,104 @@ private fun SurahListView(
             .padding(horizontal = 16.dp)
             .testTag("quran_list_view")
     ) {
+        Spacer(modifier = Modifier.height(10.dp))
+
+        // Wahy-Style 604-Page Offline Mushaf Quick-Launch Card
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("open_offline_mushaf_card")
+                .clickable(onClick = onOpenMushafLastPage),
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = Color.Transparent),
+            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Brush.horizontalGradient(listOf(DeepGreen, EmeraldGreen)))
+                    .padding(horizontal = 16.dp, vertical = 14.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = SoftGold.copy(alpha = 0.22f),
+                            border = BorderStroke(1.dp, SoftGold.copy(alpha = 0.55f)),
+                            modifier = Modifier.size(46.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.MenuBook,
+                                    contentDescription = "فتح المصحف الشريف",
+                                    tint = Color(0xFFF6DC97),
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
+                            Text(
+                                text = "المصحف الشريف (٦٠٤ صفحة)",
+                                style = MaterialTheme.typography.titleMedium.copy(fontFamily = AmiriFontFamily),
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color.White
+                            )
+                            val subText = when {
+                                state.isLoadingOfflineMushaf -> state.mushafDownloadProgress ?: "جاري تجهيز المصحف..."
+                                state.isMushafCachedOffline -> "يعمل ١٠٠٪ بدون إنترنت • متابعة من صفحة ${toArabicIndicDigits(state.lastSavedMushafPage)}"
+                                else -> "مصحف المدينة المنورة • حفظ أوفلاين عند الفتح"
+                            }
+                            Text(
+                                text = subText,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFFF6DC97),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+
+                    if (bookmark != null) {
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = SoftGold,
+                            modifier = Modifier
+                                .padding(start = 8.dp)
+                                .testTag("jump_bookmark_mushaf_chip")
+                                .clickable { onOpenMushafPage(bookmark.pageNumber) }
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Bookmark,
+                                    contentDescription = "العلامة المرجعية",
+                                    tint = Color(0xFF1A1405),
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Spacer(modifier = Modifier.width(3.dp))
+                                Text(
+                                    text = "ص ${toArabicIndicDigits(bookmark.pageNumber)}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = Color(0xFF1A1405)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Spacer(modifier = Modifier.height(10.dp))
 
         // Featured Popular Reciters Quick-Select Strip
@@ -321,8 +458,8 @@ private fun SurahListView(
         Spacer(modifier = Modifier.height(10.dp))
 
         OutlinedTextField(
-            value = state.searchQuery,
-            onValueChange = onSearchChange,
+            value = localSearchQuery,
+            onValueChange = { localSearchQuery = it },
             modifier = Modifier
                 .fillMaxWidth()
                 .testTag("surah_search_input"),
@@ -421,6 +558,7 @@ private fun SurahListItem(
         colors = CardDefaults.cardColors(
             containerColor = if (isPlaying) islamic.emeraldSoft else MaterialTheme.colorScheme.surface
         ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         border = BorderStroke(
             1.dp,
             if (isPlaying) MaterialTheme.colorScheme.primary else islamic.border
@@ -461,8 +599,9 @@ private fun SurahListItem(
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onSurface
                     )
+                    val pageLabel = if (surah.startPage > 0) " • ص ${toArabicIndicDigits(surah.startPage)}" else ""
                     Text(
-                        text = "${if (surah.revelationType == "Meccan") "مكية" else "مدنية"} • ${surah.numberOfAyahs} آية",
+                        text = "${if (surah.revelationType == "Meccan") "مكية" else "مدنية"} • ${surah.numberOfAyahs} آية$pageLabel",
                         style = MaterialTheme.typography.bodySmall,
                         color = islamic.textMuted
                     )

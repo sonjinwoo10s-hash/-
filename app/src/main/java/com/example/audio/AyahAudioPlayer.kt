@@ -16,10 +16,14 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
+import com.example.quran.TajweedEngine
+import kotlinx.coroutines.isActive
+
 data class AyahAudioState(
     val surahNumber: Int? = null,
     val ayahNumber: Int? = null,
     val globalAyahNumber: Int? = null,
+    val activeWordIndex: Int? = null,
     val isPlaying: Boolean = false,
     val isBuffering: Boolean = false,
     val repeatMode: AyahRepeatMode = AyahRepeatMode.ONCE,
@@ -82,12 +86,58 @@ class AyahAudioPlayer(private val scope: CoroutineScope) {
 
     private var mediaPlayer: MediaPlayer? = null
     private var timeoutJob: Job? = null
+    private var wordSyncJob: Job? = null
+    private var currentAyahWordCount: Int = 1
     private var sessionToken: Long = 0L
     private var preparedKey: String? = null
     private var onAdvanceCallback: ((Int) -> Unit)? = null
+    private var playbackSpeed: Float = 1.0f
 
     private val _state = MutableStateFlow(AyahAudioState())
     val state: StateFlow<AyahAudioState> = _state.asStateFlow()
+
+    fun setPlaybackSpeed(speed: Float) {
+        playbackSpeed = speed.coerceIn(0.5f, 2.0f)
+        val mp = mediaPlayer ?: return
+        if (runCatching { mp.isPlaying }.getOrDefault(false)) {
+            applySpeed(mp)
+        }
+    }
+
+    fun setVolume(volume: Float) {
+        val clamped = volume.coerceIn(0f, 1f)
+        runCatching { mediaPlayer?.setVolume(clamped, clamped) }
+    }
+
+    fun pauseIfPlaying() {
+        val mp = mediaPlayer ?: return
+        if (runCatching { mp.isPlaying }.getOrDefault(false)) {
+            runCatching { mp.pause() }
+            stopWordSyncTicker()
+            _state.update { it.copy(isPlaying = false) }
+        }
+    }
+
+    fun resumeIfPaused() {
+        val mp = mediaPlayer ?: return
+        if (!_state.value.isBuffering && !runCatching { mp.isPlaying }.getOrDefault(false)) {
+            runCatching {
+                mp.start()
+                applySpeed(mp)
+            }
+            startWordSyncTicker()
+            _state.update { it.copy(isPlaying = true, errorMessage = null) }
+        }
+    }
+
+    private fun applySpeed(player: MediaPlayer) {
+        runCatching {
+            val params = player.playbackParams
+            params.speed = playbackSpeed.coerceIn(0.5f, 2.0f)
+            params.pitch = 1.0f
+            player.playbackParams = params
+        }
+    }
 
     fun setRepeatMode(mode: AyahRepeatMode) {
         _state.update { it.copy(repeatMode = mode, currentRepeatIndex = 1) }
@@ -154,12 +204,14 @@ class AyahAudioPlayer(private val scope: CoroutineScope) {
         }
 
         val targetKey = "${reciter.id}|$surahNumber|${ayah.numberInSurah}"
+        currentAyahWordCount = TajweedEngine.countWords(ayah.text).coerceAtLeast(1)
 
         _state.update {
             it.copy(
                 surahNumber = surahNumber,
                 ayahNumber = ayah.numberInSurah,
                 globalAyahNumber = ayah.globalNumber,
+                activeWordIndex = 0,
                 isPlaying = false,
                 isBuffering = true,
                 currentRepeatIndex = 1,
@@ -230,10 +282,13 @@ class AyahAudioPlayer(private val scope: CoroutineScope) {
                     timeoutJob?.cancel()
                     preparedKey = targetKey
                     player.start()
+                    applySpeed(player)
+                    startWordSyncTicker()
                     _state.update {
                         it.copy(
                             isBuffering = false,
                             isPlaying = true,
+                            activeWordIndex = 0,
                             fallbackNote = if (fellBackFromPrimary) {
                                 "تم استخدام بث بديل للآية بصوت الشيخ مشاري العفاسي"
                             } else {
@@ -251,16 +306,19 @@ class AyahAudioPlayer(private val scope: CoroutineScope) {
                         else -> current.currentRepeatIndex < current.repeatMode.repeatCount
                     }
                     if (shouldRepeat) {
-                        _state.update { it.copy(currentRepeatIndex = it.currentRepeatIndex + 1, isPlaying = true) }
+                        _state.update { it.copy(currentRepeatIndex = it.currentRepeatIndex + 1, isPlaying = true, activeWordIndex = 0) }
                         runCatching {
                             player.seekTo(0)
                             player.start()
+                            applySpeed(player)
                         }
                     } else if (current.continueReading) {
-                        _state.update { it.copy(isPlaying = false) }
+                        stopWordSyncTicker()
+                        _state.update { it.copy(isPlaying = false, activeWordIndex = null) }
                         onAdvanceCallback?.invoke(ayahNumber + 1)
                     } else {
-                        _state.update { it.copy(isPlaying = false, currentRepeatIndex = 1) }
+                        stopWordSyncTicker()
+                        _state.update { it.copy(isPlaying = false, activeWordIndex = null, currentRepeatIndex = 1) }
                     }
                 }
                 setOnErrorListener { _, _, _ ->
@@ -278,8 +336,34 @@ class AyahAudioPlayer(private val scope: CoroutineScope) {
         }
     }
 
+    private fun startWordSyncTicker() {
+        stopWordSyncTicker()
+        wordSyncJob = scope.launch(Dispatchers.Main) {
+            while (isActive) {
+                val mp = mediaPlayer
+                if (mp != null && runCatching { mp.isPlaying }.getOrDefault(false)) {
+                    val pos = runCatching { mp.currentPosition }.getOrDefault(0).coerceAtLeast(0)
+                    val dur = runCatching { mp.duration }.getOrDefault(0).coerceAtLeast(1)
+                    val progress = (pos.toFloat() / dur.toFloat()).coerceIn(0f, 0.999f)
+                    val wordIdx = (progress * currentAyahWordCount).toInt()
+                        .coerceIn(0, (currentAyahWordCount - 1).coerceAtLeast(0))
+                    if (_state.value.activeWordIndex != wordIdx) {
+                        _state.update { it.copy(activeWordIndex = wordIdx) }
+                    }
+                }
+                delay(80L)
+            }
+        }
+    }
+
+    private fun stopWordSyncTicker() {
+        wordSyncJob?.cancel()
+        wordSyncJob = null
+    }
+
     fun stop() {
         sessionToken++
+        stopWordSyncTicker()
         releasePlayerOnly()
         preparedKey = null
         val repeat = _state.value.repeatMode
@@ -288,13 +372,20 @@ class AyahAudioPlayer(private val scope: CoroutineScope) {
     }
 
     private fun releasePlayerOnly() {
+        stopWordSyncTicker()
         timeoutJob?.cancel()
         timeoutJob = null
-        runCatching {
-            mediaPlayer?.stop()
-            mediaPlayer?.reset()
-            mediaPlayer?.release()
-        }
+        val oldPlayer = mediaPlayer
         mediaPlayer = null
+        if (oldPlayer != null) {
+            runCatching {
+                oldPlayer.setOnPreparedListener(null)
+                oldPlayer.setOnCompletionListener(null)
+                oldPlayer.setOnErrorListener(null)
+                if (oldPlayer.isPlaying) oldPlayer.stop()
+                oldPlayer.reset()
+                oldPlayer.release()
+            }
+        }
     }
 }

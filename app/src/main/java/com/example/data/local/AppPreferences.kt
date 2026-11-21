@@ -39,6 +39,8 @@ class AppPreferences(private val context: Context) {
         val BOOKMARK_SURAH_NUM = intPreferencesKey("bookmark_surah_num")
         val BOOKMARK_SURAH_NAME = stringPreferencesKey("bookmark_surah_name")
         val BOOKMARK_AYAH_NUM = intPreferencesKey("bookmark_ayah_num")
+        val BOOKMARK_PAGE_NUM = intPreferencesKey("bookmark_page_num")
+        val LAST_MUSHAF_PAGE = intPreferencesKey("last_mushaf_page")
         val QURAN_FONT_SIZE = floatPreferencesKey("quran_font_size")
         val SURAH_CACHE_JSON = stringPreferencesKey("surah_cache_json")
 
@@ -63,6 +65,8 @@ class AppPreferences(private val context: Context) {
         val SELECTED_QURAN_RECITER_JSON = stringPreferencesKey("selected_quran_reciter_json")
         val RECITERS_CACHE_JSON = stringPreferencesKey("reciters_cache_json")
         val MUSHAF_PAPER_THEME = stringPreferencesKey("mushaf_paper_theme")
+        val QURAN_PLAYBACK_SPEED = floatPreferencesKey("quran_playback_speed")
+        val TAJWEED_COLORS_ENABLED = booleanPreferencesKey("tajweed_colors_enabled")
 
         // Smart Fajr Alarm
         val FAJR_ALARM_SETTINGS_JSON = stringPreferencesKey("fajr_alarm_settings_json")
@@ -70,6 +74,20 @@ class AppPreferences(private val context: Context) {
         // Upgraded Hadith Library
         val FAVORITE_HADITH_UIDS = stringSetPreferencesKey("favorite_hadith_uids")
         val HADITH_FONT_SIZE = floatPreferencesKey("hadith_font_size")
+        val LAST_HADITH_BOOK_ID = stringPreferencesKey("last_hadith_book_id")
+        val LAST_HADITH_SCROLL_INDEX = intPreferencesKey("last_hadith_scroll_index")
+
+        // Word-by-Word Highlighting & Automatic Latency Compensation
+        val WORD_BY_WORD_HIGHLIGHT_ENABLED = booleanPreferencesKey("word_by_word_highlight_enabled")
+        val SYNC_OFFSET_BLUETOOTH_MS = intPreferencesKey("sync_offset_bluetooth_ms")
+        val SYNC_OFFSET_SPEAKER_MS = intPreferencesKey("sync_offset_speaker_ms")
+
+        // Persistent Next-Prayer Countdown Notification
+        val COUNTDOWN_NOTIFICATION_ENABLED = booleanPreferencesKey("countdown_notification_enabled")
+
+        // Adhan Quick-Silence Controls (both ON by default)
+        val ADHAN_SILENCE_ON_VOLUME = booleanPreferencesKey("adhan_silence_on_volume")
+        val ADHAN_SILENCE_ON_FLIP = booleanPreferencesKey("adhan_silence_on_flip")
     }
 
     private val safeDataFlow: Flow<Preferences> = context.rafiqDataStore.data.catch {
@@ -109,9 +127,14 @@ class AppPreferences(private val context: Context) {
         val num = prefs[Keys.BOOKMARK_SURAH_NUM]
         val name = prefs[Keys.BOOKMARK_SURAH_NAME]
         val ayah = prefs[Keys.BOOKMARK_AYAH_NUM]
+        val page = prefs[Keys.BOOKMARK_PAGE_NUM] ?: 1
         if (num != null && name != null && ayah != null) {
-            QuranBookmark(surahNumber = num, surahName = name, ayahNumber = ayah)
+            QuranBookmark(surahNumber = num, surahName = name, ayahNumber = ayah, pageNumber = page)
         } else null
+    }
+
+    val lastMushafPageFlow: Flow<Int> = safeDataFlow.map { prefs ->
+        (prefs[Keys.LAST_MUSHAF_PAGE] ?: 1).coerceIn(1, 604)
     }
 
     val tasbihFlow: Flow<TasbihState> = context.rafiqDataStore.data.map { prefs ->
@@ -168,6 +191,14 @@ class AppPreferences(private val context: Context) {
         MushafPaperTheme.entries.find { it.name == raw } ?: MushafPaperTheme.CREAM
     }
 
+    val quranPlaybackSpeedFlow: Flow<Float> = safeDataFlow.map { prefs ->
+        (prefs[Keys.QURAN_PLAYBACK_SPEED] ?: 1.0f).coerceIn(0.5f, 2.0f)
+    }
+
+    val tajweedColorsEnabledFlow: Flow<Boolean> = safeDataFlow.map { prefs ->
+        prefs[Keys.TAJWEED_COLORS_ENABLED] ?: false
+    }
+
     val fajrAlarmSettingsFlow: Flow<FajrAlarmSettings> = safeDataFlow.map { prefs ->
         val json = prefs[Keys.FAJR_ALARM_SETTINGS_JSON]
         if (json.isNullOrBlank()) {
@@ -183,6 +214,36 @@ class AppPreferences(private val context: Context) {
 
     val hadithFontSizeFlow: Flow<Float> = safeDataFlow.map { prefs ->
         prefs[Keys.HADITH_FONT_SIZE] ?: 20f
+    }
+
+    val countdownNotificationEnabledFlow: Flow<Boolean> = safeDataFlow.map { prefs ->
+        prefs[Keys.COUNTDOWN_NOTIFICATION_ENABLED] ?: true
+    }
+
+    val adhanSilenceOnVolumeFlow: Flow<Boolean> = safeDataFlow.map { prefs ->
+        prefs[Keys.ADHAN_SILENCE_ON_VOLUME] ?: true
+    }
+
+    val adhanSilenceOnFlipFlow: Flow<Boolean> = safeDataFlow.map { prefs ->
+        prefs[Keys.ADHAN_SILENCE_ON_FLIP] ?: true
+    }
+
+    val wordByWordHighlightEnabledFlow: Flow<Boolean> = safeDataFlow.map { prefs ->
+        prefs[Keys.WORD_BY_WORD_HIGHLIGHT_ENABLED] ?: true
+    }
+
+    val syncOffsetBluetoothMsFlow: Flow<Int> = safeDataFlow.map { prefs ->
+        (prefs[Keys.SYNC_OFFSET_BLUETOOTH_MS] ?: 180).coerceIn(-300, 300)
+    }
+
+    val syncOffsetSpeakerMsFlow: Flow<Int> = safeDataFlow.map { prefs ->
+        (prefs[Keys.SYNC_OFFSET_SPEAKER_MS] ?: 0).coerceIn(-300, 300)
+    }
+
+    val lastHadithResumeFlow: Flow<Pair<String, Int>?> = safeDataFlow.map { prefs ->
+        val bookId = prefs[Keys.LAST_HADITH_BOOK_ID]
+        if (bookId.isNullOrBlank()) null
+        else bookId to (prefs[Keys.LAST_HADITH_SCROLL_INDEX] ?: 0).coerceAtLeast(0)
     }
 
     suspend fun setDarkMode(enabled: Boolean) {
@@ -214,6 +275,15 @@ class AppPreferences(private val context: Context) {
             it[Keys.BOOKMARK_SURAH_NUM] = bookmark.surahNumber
             it[Keys.BOOKMARK_SURAH_NAME] = bookmark.surahName
             it[Keys.BOOKMARK_AYAH_NUM] = bookmark.ayahNumber
+            it[Keys.BOOKMARK_PAGE_NUM] = bookmark.pageNumber.coerceIn(1, 604)
+        }
+    }
+
+    suspend fun saveLastMushafPage(pageNumber: Int) {
+        runCatching {
+            context.rafiqDataStore.edit {
+                it[Keys.LAST_MUSHAF_PAGE] = pageNumber.coerceIn(1, 604)
+            }
         }
     }
 
@@ -301,6 +371,18 @@ class AppPreferences(private val context: Context) {
         runCatching { context.rafiqDataStore.edit { it[Keys.MUSHAF_PAPER_THEME] = theme.name } }
     }
 
+    suspend fun setQuranPlaybackSpeed(speed: Float) {
+        runCatching {
+            context.rafiqDataStore.edit { it[Keys.QURAN_PLAYBACK_SPEED] = speed.coerceIn(0.5f, 2.0f) }
+        }
+    }
+
+    suspend fun setTajweedColorsEnabled(enabled: Boolean) {
+        runCatching {
+            context.rafiqDataStore.edit { it[Keys.TAJWEED_COLORS_ENABLED] = enabled }
+        }
+    }
+
     suspend fun saveFajrAlarmSettings(settings: FajrAlarmSettings) {
         val json = runCatching { fajrAlarmAdapter.toJson(settings) }.getOrNull() ?: return
         runCatching { context.rafiqDataStore.edit { it[Keys.FAJR_ALARM_SETTINGS_JSON] = json } }
@@ -312,5 +394,42 @@ class AppPreferences(private val context: Context) {
 
     suspend fun setHadithFontSize(sizeSp: Float) {
         runCatching { context.rafiqDataStore.edit { it[Keys.HADITH_FONT_SIZE] = sizeSp } }
+    }
+
+    suspend fun setCountdownNotificationEnabled(enabled: Boolean) {
+        runCatching { context.rafiqDataStore.edit { it[Keys.COUNTDOWN_NOTIFICATION_ENABLED] = enabled } }
+    }
+
+    suspend fun setAdhanSilenceOnVolume(enabled: Boolean) {
+        runCatching { context.rafiqDataStore.edit { it[Keys.ADHAN_SILENCE_ON_VOLUME] = enabled } }
+    }
+
+    suspend fun setAdhanSilenceOnFlip(enabled: Boolean) {
+        runCatching { context.rafiqDataStore.edit { it[Keys.ADHAN_SILENCE_ON_FLIP] = enabled } }
+    }
+
+    suspend fun setWordByWordHighlightEnabled(enabled: Boolean) {
+        runCatching { context.rafiqDataStore.edit { it[Keys.WORD_BY_WORD_HIGHLIGHT_ENABLED] = enabled } }
+    }
+
+    suspend fun setSyncOffsetBluetoothMs(offsetMs: Int) {
+        runCatching {
+            context.rafiqDataStore.edit { it[Keys.SYNC_OFFSET_BLUETOOTH_MS] = offsetMs.coerceIn(-300, 300) }
+        }
+    }
+
+    suspend fun setSyncOffsetSpeakerMs(offsetMs: Int) {
+        runCatching {
+            context.rafiqDataStore.edit { it[Keys.SYNC_OFFSET_SPEAKER_MS] = offsetMs.coerceIn(-300, 300) }
+        }
+    }
+
+    suspend fun saveLastHadithReadingPosition(bookId: String, scrollIndex: Int) {
+        runCatching {
+            context.rafiqDataStore.edit {
+                it[Keys.LAST_HADITH_BOOK_ID] = bookId
+                it[Keys.LAST_HADITH_SCROLL_INDEX] = scrollIndex.coerceAtLeast(0)
+            }
+        }
     }
 }

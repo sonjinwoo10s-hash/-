@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -47,10 +48,13 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -63,10 +67,15 @@ import androidx.compose.ui.unit.dp
 import com.example.data.local.OfflineIslamicData
 import com.example.data.model.MoshafOption
 import com.example.data.model.ReciterOption
+import com.example.ui.components.ArabicEmptyStateCard
+import com.example.ui.components.ArabicOfflineErrorCard
+import com.example.ui.components.ArabicSkeletonList
 import com.example.ui.theme.DeepGreen
 import com.example.ui.theme.EmeraldGreen
 import com.example.ui.theme.LocalIslamicColors
 import com.example.ui.theme.SoftGold
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -84,15 +93,22 @@ fun ReciterLibraryModal(
 
     val islamic = LocalIslamicColors.current
     var searchQuery by remember { mutableStateOf("") }
+    var debouncedQuery by remember { mutableStateOf("") }
     var selectedRiwayahFilter by remember { mutableStateOf("الكل") }
 
-    val riwayahFilters = listOf("الكل", "حفص", "ورش", "قالون", "مجود")
-
-    val normalizedQuery = remember(searchQuery) {
-        OfflineIslamicData.normalizeArabic(searchQuery)
+    // 300ms debounce so typing stays instantaneous on low-end devices
+    LaunchedEffect(searchQuery) {
+        delay(300L)
+        debouncedQuery = searchQuery
     }
 
-    val displayedApiReciters = remember(apiReciters, normalizedQuery, selectedRiwayahFilter) {
+    val riwayahFilters = listOf("الكل", "حفص", "ورش", "مرتل", "مجود")
+
+    val normalizedQuery = remember(debouncedQuery) {
+        OfflineIslamicData.normalizeArabic(debouncedQuery)
+    }
+
+    val displayedApiReciters = remember(apiReciters, featuredReciters, normalizedQuery, selectedRiwayahFilter) {
         val source = if (apiReciters.isNotEmpty()) apiReciters else featuredReciters
         source.filter { reciter ->
             val matchQuery = normalizedQuery.isEmpty() ||
@@ -103,6 +119,24 @@ fun ReciterLibraryModal(
                 reciter.moshafList.any { it.name.contains(selectedRiwayahFilter) }
             matchQuery && matchRiwayah
         }
+    }
+
+    // Paginate long reciter list: render 25 initially and auto-load +25 on scroll
+    var visibleCount by remember(normalizedQuery, selectedRiwayahFilter, apiReciters.size) {
+        mutableIntStateOf(25)
+    }
+    val pagedReciters = remember(displayedApiReciters, visibleCount) {
+        displayedApiReciters.take(visibleCount)
+    }
+    val listState = rememberLazyListState()
+    LaunchedEffect(listState, displayedApiReciters.size, visibleCount) {
+        snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }
+            .distinctUntilChanged()
+            .collect { lastVisible ->
+                if (visibleCount < displayedApiReciters.size && lastVisible >= pagedReciters.size - 5) {
+                    visibleCount = (visibleCount + 25).coerceAtMost(displayedApiReciters.size)
+                }
+            }
     }
 
     Surface(
@@ -157,7 +191,7 @@ fun ReciterLibraryModal(
                             )
                             Text(
                                 text = if (apiReciters.isNotEmpty()) {
-                                    "${apiReciters.size} قارئاً من MP3Quran"
+                                    "${apiReciters.size} قارئاً • محفوظ محلياً للعمل بدون إنترنت"
                                 } else {
                                     "أشهر القراء مع دعم جميع الروايات"
                                 },
@@ -176,7 +210,7 @@ fun ReciterLibraryModal(
                     ) {
                         Icon(
                             imageVector = Icons.Default.Refresh,
-                            contentDescription = "تحديث قائمة القراء",
+                            contentDescription = "تحديث",
                             tint = Color(0xFFF6DC97)
                         )
                     }
@@ -225,6 +259,42 @@ fun ReciterLibraryModal(
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Clean Refresh Button
+                Button(
+                    onClick = onRetryFetch,
+                    enabled = !isLoading,
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("sync_reciters_repo_button")
+                ) {
+                    if (isLoading) {
+                        CircularProgressIndicator(
+                            color = Color.White,
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "جاري التحديث...",
+                            fontWeight = FontWeight.Bold
+                        )
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = "تحديث",
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "تحديث",
+                            fontWeight = FontWeight.ExtraBold
+                        )
                     }
                 }
 
@@ -343,17 +413,19 @@ fun ReciterLibraryModal(
 
                 when {
                     isLoading && apiReciters.isEmpty() -> {
-                        Box(
+                        Column(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .weight(1f),
-                            contentAlignment = Alignment.Center
+                                .weight(1f)
+                                .padding(top = 6.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-                                Spacer(modifier = Modifier.height(10.dp))
-                                Text("جاري تحميل قائمة جميع القراء...", color = islamic.textMuted)
-                            }
+                            Text(
+                                text = "جاري تحميل قائمة جميع القراء...",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = islamic.textMuted
+                            )
+                            ArabicSkeletonList(itemCount = 5)
                         }
                     }
                     displayedApiReciters.isEmpty() -> {
@@ -363,24 +435,30 @@ fun ReciterLibraryModal(
                                 .weight(1f),
                             contentAlignment = Alignment.Center
                         ) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text("لا يوجد قارئ مطابق لبحثك", color = islamic.textMuted)
-                                if (errorMessage != null) {
-                                    Spacer(modifier = Modifier.height(8.dp))
-                                    Button(onClick = onRetryFetch) {
-                                        Text("إعادة تحميل القائمة")
-                                    }
-                                }
+                            if (errorMessage != null) {
+                                ArabicOfflineErrorCard(
+                                    message = "لا يوجد اتصال بالإنترنت — إعادة المحاولة",
+                                    subtitle = errorMessage,
+                                    retryLabel = "إعادة المحاولة",
+                                    onRetry = onRetryFetch
+                                )
+                            } else {
+                                ArabicEmptyStateCard(
+                                    title = "لا يوجد قارئ مطابق لبحثك",
+                                    subtitle = "جرّب البحث باسم آخر أو اختيار رواية «الكل».",
+                                    icon = Icons.Default.Search
+                                )
                             }
                         }
                     }
                     else -> {
                         LazyColumn(
+                            state = listState,
                             modifier = Modifier.weight(1f),
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                             contentPadding = PaddingValues(bottom = 20.dp)
                         ) {
-                            items(displayedApiReciters, key = { it.id }) { reciter ->
+                            items(pagedReciters, key = { it.id }) { reciter ->
                                 ReciterListCard(
                                     reciter = reciter,
                                     selectedReciter = selectedReciter,
@@ -418,6 +496,7 @@ private fun ReciterListCard(
         colors = CardDefaults.cardColors(
             containerColor = if (isCurrentReciter) islamic.emeraldSoft else MaterialTheme.colorScheme.surface
         ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         border = BorderStroke(
             width = if (isCurrentReciter) 1.5.dp else 1.dp,
             color = if (isCurrentReciter) MaterialTheme.colorScheme.primary else islamic.border

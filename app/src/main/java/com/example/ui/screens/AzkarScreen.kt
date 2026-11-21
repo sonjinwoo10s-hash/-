@@ -63,10 +63,11 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
+import com.example.ui.components.ArabicSkeletonList
+import com.example.ui.components.performKeyTapHaptic
 import com.example.util.VibrationHelper
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -200,10 +201,15 @@ private fun AzkarListSubView(
     onResetCategory: () -> Unit
 ) {
     val islamic = LocalIslamicColors.current
-    val haptic = LocalHapticFeedback.current
-    val categories = remember { OfflineIslamicData.azkarCategories.keys.toList() }
-    val currentItems = OfflineIslamicData.azkarCategories[state.selectedCategory].orEmpty()
+    val view = LocalView.current
+    val categories = state.categoryNames.ifEmpty { state.categories.keys.toList() }
+    val currentItems = state.categories[state.selectedCategory].orEmpty()
     val completedCount = currentItems.count { (state.remainingCounts[it.id] ?: it.requiredCount) == 0 }
+
+    if (state.isLoading && currentItems.isEmpty()) {
+        ArabicSkeletonList(itemCount = 4)
+        return
+    }
 
     LazyRow(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -261,7 +267,7 @@ private fun AzkarListSubView(
                 remaining = remaining,
                 onTap = {
                     if (remaining > 0) {
-                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        performKeyTapHaptic(view)
                         onDecrementZikr(zikr.id)
                     }
                 }
@@ -374,7 +380,7 @@ private fun ElectronicTasbihSubView(
 ) {
     val islamic = LocalIslamicColors.current
     val context = LocalContext.current
-    val haptic = LocalHapticFeedback.current
+    val view = LocalView.current
     var phraseMenuOpen by remember { mutableStateOf(false) }
     var targetMenuOpen by remember { mutableStateOf(false) }
     var customPhraseInput by remember { mutableStateOf("") }
@@ -563,6 +569,7 @@ private fun ElectronicTasbihSubView(
                             interactionSource = interactionSource,
                             indication = null
                         ) {
+                            performKeyTapHaptic(view)
                             val completesRound = tasbihState.target > 0 && (tasbihState.current + 1) >= tasbihState.target
                             if (VibrationHelper.isVibrationSupported(context)) {
                                 if (completesRound) {

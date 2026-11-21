@@ -1,24 +1,31 @@
 package com.example.ui.viewmodel
 
 import android.app.Application
-import android.app.DownloadManager
 import android.content.Context
 import android.location.Location
 import android.net.Uri
 import android.os.Build
-import android.os.Environment
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.BuildConfig
+import com.example.alarm.PermissionsHelper
+import com.example.alarm.PrayerAlarmScheduler
+import com.example.alarm.PrayerScheduleStore
 import com.example.audio.AdhanAudioPlayer
 import com.example.audio.AudioPlayerState
 import com.example.audio.AyahAudioPlayer
 import com.example.audio.AyahAudioState
 import com.example.audio.FajrAlarmPlayer
 import com.example.audio.QuranAudioPlayer
+import com.example.audio.QuranPlaybackSpeeds
 import com.example.data.local.AppPreferences
 import com.example.data.local.HadithLibraryData
 import com.example.data.local.MuezzinLibraryData
 import com.example.data.local.OfflineIslamicData
+import com.example.data.local.PersistentOfflineStorage
+import com.example.quran.TajweedEngine
+import com.example.service.PrayerCountdownService
+import com.example.service.QuranMediaEngine
 import com.example.data.model.AdhanPlayerState
 import com.example.data.model.AyahItem
 import com.example.data.model.AyahRepeatMode
@@ -35,6 +42,7 @@ import com.example.data.model.MuezzinAudioOverride
 import com.example.data.model.MuezzinItem
 import com.example.data.model.MuezzinRegion
 import com.example.data.model.MushafPaperTheme
+import com.example.data.model.OfflineHadithBookMeta
 import com.example.data.model.PrayerEntry
 import com.example.data.model.PrayerTimesUiState
 import com.example.data.model.QuranBookmark
@@ -43,7 +51,22 @@ import com.example.data.model.ReciterOption
 import com.example.data.model.SurahSummary
 import com.example.data.model.TasbihState
 import com.example.data.model.WorshipTask
+import com.example.data.model.ZikrItem
 import com.example.data.remote.IslamicNetworkClient
+import com.example.data.repository.MuezzinRepository
+import com.example.data.repository.MushafPageAyah
+import com.example.data.repository.MushafPageData
+import com.example.data.repository.OfflineAdhkarRepository
+import com.example.data.repository.OfflineHadithRepository
+import com.example.data.repository.OfflineMushafBook
+import com.example.data.repository.OfflineQuranRepository
+import com.example.data.repository.QuranTimingRepository
+import com.example.ui.components.AppUpdateDialogStage
+import com.example.ui.components.AppUpdateUiState
+import com.example.update.AppUpdateManager
+import com.example.data.repository.ReciterRepository
+import com.example.data.repository.TafsirBook
+import com.example.data.repository.TafsirRepository
 import com.example.sensor.QiblaMath
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -90,31 +113,54 @@ data class QuranUiState(
     val isFullScreenReading: Boolean = false,
     val showAllTafsir: Boolean = false,
     val expandedTafsirAyahs: Set<Int> = emptySet(),
-    val targetScrollAyah: Int = 1
+    val targetScrollAyah: Int = 1,
+    // 100% Offline 604-page Wahy Mushaf state
+    val isMushafOpen: Boolean = false,
+    val currentMushafPage: Int = 1,
+    val lastSavedMushafPage: Int = 1,
+    val mushafPages: List<MushafPageData> = emptyList(),
+    val surahStartPages: Map<Int, Int> = emptyMap(),
+    val juzStartPages: Map<Int, Int> = emptyMap(),
+    val isLoadingOfflineMushaf: Boolean = false,
+    val mushafDownloadProgress: String? = null,
+    val mushafError: String? = null,
+    val isMushafCachedOffline: Boolean = false
+)
+
+data class TafsirUiState(
+    val selectedBook: TafsirBook = TafsirBook.MUYASSAR,
+    val currentSurahNumber: Int = 1,
+    val currentAyahNumber: Int = 1,
+    val currentText: String? = null,
+    val isLoading: Boolean = false,
+    val errorMessage: String? = null,
+    val downloadedBookIds: Set<String> = emptySet(),
+    val downloadingProgress: Map<String, Float> = emptyMap()
 )
 
 data class AzkarUiState(
     val subTabIndex: Int = 0, // 0 = Azkar, 1 = Tasbih
-    val selectedCategory: String = OfflineIslamicData.azkarCategories.keys.first(),
+    val selectedCategory: String = "أذكار الصباح",
+    val categories: Map<String, List<ZikrItem>> = emptyMap(),
+    val categoryNames: List<String> = emptyList(),
+    val isLoading: Boolean = false,
     val remainingCounts: Map<String, Int> = emptyMap()
 )
 
 data class HadithUiState(
-    val selectedBook: HadithBookCollection = HadithBookCollection.BUKHARI,
-    val searchQuery: String = "",
-    val searchAllBooks: Boolean = false,
-    val selectedChapter: String = HadithChapters.ALL,
-    val loadedCollections: Map<HadithBookCollection, List<LibraryHadith>> = mapOf(
-        HadithBookCollection.BUKHARI to HadithLibraryData.bukhariOffline,
-        HadithBookCollection.MUSLIM to HadithLibraryData.muslimOffline,
-        HadithBookCollection.QUDSI to HadithLibraryData.qudsiOffline,
-        HadithBookCollection.NAWAWI to HadithLibraryData.nawawiOffline()
-    ),
-    val fetchedFromApiBooks: Set<HadithBookCollection> = emptySet(),
+    val activeSubTab: Int = 0, // 0 = المكتبة والكتب, 1 = المفضلة
+    val openBook: HadithBookCollection? = null,
+    val bookStatuses: Map<String, OfflineHadithBookMeta> = emptyMap(),
+    val downloadingProgress: Map<String, Float> = emptyMap(),
+    val loadedCollections: Map<HadithBookCollection, List<LibraryHadith>> = emptyMap(),
     val isLoadingBook: Boolean = false,
-    val bookLoadNotice: String? = null,
-    val visibleCount: Int = 30,
-    val expandedUids: Set<String> = emptySet()
+    val bookError: String? = null,
+    val searchQuery: String = "",
+    val favoritesSearchQuery: String = "",
+    val useCairoFont: Boolean = false, // false = Amiri (default), true = Cairo
+    val visibleCount: Int = 25,
+    val expandedUids: Set<String> = emptySet(),
+    val savedFavoriteHadiths: List<LibraryHadith> = emptyList()
 )
 
 data class ToolsUiState(
@@ -137,9 +183,10 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
     private enum class AudioSource { SURAH, AYAH, ADHAN, FAJR_ALARM }
 
     private val prefs = AppPreferences(application.applicationContext)
-    private val audioPlayer = QuranAudioPlayer(viewModelScope)
-    private val ayahAudioPlayer = AyahAudioPlayer(viewModelScope)
-    private val adhanPlayer = AdhanAudioPlayer(viewModelScope)
+    // Process-scoped background audio players linked to QuranAudioPlaybackService
+    private val audioPlayer: QuranAudioPlayer get() = QuranMediaEngine.surahPlayer
+    private val ayahAudioPlayer: AyahAudioPlayer get() = QuranMediaEngine.ayahPlayer
+    private val adhanPlayer = AdhanAudioPlayer(application.applicationContext, viewModelScope)
     private val fajrAlarmPlayer = FajrAlarmPlayer(application.applicationContext, viewModelScope)
 
     private fun stopOtherAudio(except: AudioSource) {
@@ -166,6 +213,10 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope, SharingStarted.WhileSubscribed(5000), MushafPaperTheme.CREAM
     )
 
+    val tajweedColorsEnabled: StateFlow<Boolean> = prefs.tajweedColorsEnabledFlow.stateIn(
+        viewModelScope, SharingStarted.WhileSubscribed(5000), false
+    )
+
     val fajrAlarmSettings: StateFlow<FajrAlarmSettings> = prefs.fajrAlarmSettingsFlow.stateIn(
         viewModelScope, SharingStarted.WhileSubscribed(5000), FajrAlarmSettings()
     )
@@ -176,6 +227,18 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
 
     val hadithFontSize: StateFlow<Float> = prefs.hadithFontSizeFlow.stateIn(
         viewModelScope, SharingStarted.WhileSubscribed(5000), 20f
+    )
+
+    val countdownNotificationEnabled: StateFlow<Boolean> = prefs.countdownNotificationEnabledFlow.stateIn(
+        viewModelScope, SharingStarted.WhileSubscribed(5000), true
+    )
+
+    val adhanSilenceOnVolume: StateFlow<Boolean> = prefs.adhanSilenceOnVolumeFlow.stateIn(
+        viewModelScope, SharingStarted.WhileSubscribed(5000), true
+    )
+
+    val adhanSilenceOnFlip: StateFlow<Boolean> = prefs.adhanSilenceOnFlipFlow.stateIn(
+        viewModelScope, SharingStarted.WhileSubscribed(5000), true
     )
 
     val bookmark: StateFlow<QuranBookmark?> = prefs.bookmarkFlow.stateIn(
@@ -215,11 +278,27 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
             viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap()
         )
 
+    private val _repoMuezzins = MutableStateFlow<List<MuezzinItem>>(emptyList())
+
+    private val _isSyncingMuezzinRepo = MutableStateFlow(false)
+    val isSyncingMuezzinRepo: StateFlow<Boolean> = _isSyncingMuezzinRepo.asStateFlow()
+
+    private val _muezzinRepoStatus = MutableStateFlow<String?>(null)
+    val muezzinRepoStatus: StateFlow<String?> = _muezzinRepoStatus.asStateFlow()
+
+    private val _cachedAdhanIds = MutableStateFlow<Set<String>>(emptySet())
+    val cachedAdhanIds: StateFlow<Set<String>> = _cachedAdhanIds.asStateFlow()
+
+    private val _downloadingMuezzinIds = MutableStateFlow<Set<String>>(emptySet())
+    val downloadingMuezzinIds: StateFlow<Set<String>> = _downloadingMuezzinIds.asStateFlow()
+
     val allMuezzins: StateFlow<List<MuezzinItem>> = combine(
         customMuezzins,
-        muezzinAudioOverrides
-    ) { custom, overrides ->
-        val mergedBuiltIns = MuezzinLibraryData.builtInMuezzins.map { item ->
+        muezzinAudioOverrides,
+        _repoMuezzins
+    ) { custom, overrides, repoList ->
+        val baseCatalog = if (repoList.isNotEmpty()) repoList else MuezzinLibraryData.builtInMuezzins
+        val mergedBase = baseCatalog.map { item ->
             val ov = overrides[item.id]
             if (ov != null) {
                 val hasValidLocal = !ov.localFilePath.isNullOrBlank() && File(ov.localFilePath).exists()
@@ -244,7 +323,7 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         val mergedCustom = custom.map { it.copy(hasCustomAudio = true) }
-        mergedCustom + mergedBuiltIns
+        mergedCustom + mergedBase
     }.stateIn(
         viewModelScope, SharingStarted.WhileSubscribed(5000), MuezzinLibraryData.builtInMuezzins
     )
@@ -253,7 +332,10 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
         allMuezzins,
         defaultMuezzinId
     ) { list, id ->
-        list.find { it.id == id } ?: MuezzinLibraryData.builtInMuezzins.first()
+        list.find { it.id == id }
+            ?: list.firstOrNull { it.hasAudioSource() }
+            ?: list.firstOrNull()
+            ?: MuezzinLibraryData.builtInMuezzins.first()
     }.stateIn(
         viewModelScope, SharingStarted.WhileSubscribed(5000), MuezzinLibraryData.builtInMuezzins.first()
     )
@@ -275,7 +357,10 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
         fajrMuezzinId
     ) { list, id ->
         list.find { it.id == id }
-            ?: list.find { it.isFajr }
+            ?: list.firstOrNull { it.isFajr && it.hasAudioSource() }
+            ?: list.firstOrNull { it.isFajr }
+            ?: list.firstOrNull { it.hasAudioSource() }
+            ?: list.firstOrNull()
             ?: MuezzinLibraryData.builtInMuezzins.first()
     }.stateIn(
         viewModelScope, SharingStarted.WhileSubscribed(5000), MuezzinLibraryData.builtInMuezzins.first()
@@ -316,6 +401,9 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
     private val _quranState = MutableStateFlow(QuranUiState())
     val quranState: StateFlow<QuranUiState> = _quranState.asStateFlow()
 
+    private val _tafsirState = MutableStateFlow(TafsirUiState())
+    val tafsirState: StateFlow<TafsirUiState> = _tafsirState.asStateFlow()
+
     private val _azkarState = MutableStateFlow(AzkarUiState())
     val azkarState: StateFlow<AzkarUiState> = _azkarState.asStateFlow()
 
@@ -325,9 +413,33 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
     private val _toolsState = MutableStateFlow(ToolsUiState())
     val toolsState: StateFlow<ToolsUiState> = _toolsState.asStateFlow()
 
+    private val _appUpdateState = MutableStateFlow(AppUpdateUiState())
+    val appUpdateState: StateFlow<AppUpdateUiState> = _appUpdateState.asStateFlow()
+
+    private val _aboutCopyrightOpen = MutableStateFlow(false)
+    val aboutCopyrightOpen: StateFlow<Boolean> = _aboutCopyrightOpen.asStateFlow()
+
+    val lastHadithResume: StateFlow<Pair<HadithBookCollection, Int>?> = prefs.lastHadithResumeFlow
+        .map { pair ->
+            if (pair == null) null
+            else HadithBookCollection.entries.find { it.id == pair.first }?.let { it to pair.second }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
     private var currentTimings24: Map<String, String> = OfflineIslamicData.fallbackTimings24
     private var countdownJob: Job? = null
+    private var appUpdateDownloadJob: Job? = null
     private var surahListRequested = false
+    private var offlineMushafBook: OfflineMushafBook? = null
+    private var offlineMushafJob: Job? = null
+    private var azkarLoadJob: Job? = null
+    private var tafsirFetchJob: Job? = null
+    private val activeSurahAudioDownloads = mutableSetOf<String>()
+    private var tafsirStatusesLoaded = false
+    private var hadithFavoritesLoaded = false
+    private var muezzinCatalogLoaded = false
+    private var pendingMushafSurah: Int? = null
+    private var pendingMushafAyah: Int = 1
 
     private val prayerMeta = listOf(
         "Fajr" to "الفجر",
@@ -338,6 +450,18 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
     )
 
     init {
+        QuranMediaEngine.ensureInitialized(
+            context = application.applicationContext,
+            resolveSurahName = { num -> resolveSurahName(num) }
+        )
+        // Clean up any leftover update APK & perform silent check (max once per 12h) off main thread
+        viewModelScope.launch {
+            val appCtx = getApplication<Application>().applicationContext
+            AppUpdateManager.cleanupLeftoverUpdateApk(appCtx)
+            if (AppUpdateManager.shouldRunSilentCheck(appCtx)) {
+                checkForAppUpdate(manual = false)
+            }
+        }
         viewModelScope.launch {
             val savedCityId = prefs.selectedCityIdFlow.first()
             val city = OfflineIslamicData.cities.find { it.id == savedCityId }
@@ -351,16 +475,81 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
             _worshipTasks.value = OfflineIslamicData.worshipTasks.map {
                 it.copy(completed = doneIds.contains(it.id))
             }
-        }
-        viewModelScope.launch {
-            val savedAzkar = prefs.getAzkarRemaining(todayKey())
-            val defaults = OfflineIslamicData.azkarCategories.values.flatten()
-                .associate { it.id to (savedAzkar[it.id] ?: it.requiredCount) }
-            _azkarState.update { it.copy(remainingCounts = defaults) }
+            refreshFuturePrayerLocks(System.currentTimeMillis())
         }
         viewModelScope.launch {
             val persistedReciter = prefs.selectedQuranReciterFlow.first()
             audioPlayer.syncPersistedReciter(persistedReciter)
+            val persistedSpeed = prefs.quranPlaybackSpeedFlow.first()
+            audioPlayer.syncPersistedSpeed(persistedSpeed)
+            ayahAudioPlayer.setPlaybackSpeed(persistedSpeed)
+            val wbwEnabled = prefs.wordByWordHighlightEnabledFlow.first()
+            val btOffset = prefs.syncOffsetBluetoothMsFlow.first()
+            val spkOffset = prefs.syncOffsetSpeakerMsFlow.first()
+            audioPlayer.syncLatencyPreferences(
+                wordByWordEnabled = wbwEnabled,
+                bluetoothOffsetMs = btOffset,
+                speakerOffsetMs = spkOffset
+            )
+        }
+        // Keep PrayerScheduleStore synchronized with selected Muezzin / Fajr Adhan for background playback
+        viewModelScope.launch {
+            combine(
+                activeDefaultMuezzin,
+                activeFajrMuezzin,
+                useDedicatedFajrAdhan
+            ) { defM, fajrM, dedicated ->
+                Triple(defM, fajrM, dedicated)
+            }.collect { (defM, fajrM, dedicated) ->
+                PrayerScheduleStore.saveMuezzinSelection(
+                    context = getApplication(),
+                    defaultMuezzin = defM,
+                    fajrMuezzin = fajrM,
+                    useDedicatedFajr = dedicated
+                )
+            }
+        }
+        // Keep persistent countdown notification service synced with user preference
+        viewModelScope.launch {
+            prefs.countdownNotificationEnabledFlow.collect { enabled ->
+                val appCtx = getApplication<Application>().applicationContext
+                PrayerScheduleStore.setCountdownNotificationEnabled(appCtx, enabled)
+                PrayerCountdownService.syncState(appCtx)
+            }
+        }
+        // Keep Adhan quick-silence toggles synced in PrayerScheduleStore for lock-screen service access
+        viewModelScope.launch {
+            prefs.adhanSilenceOnVolumeFlow.collect { enabled ->
+                PrayerScheduleStore.setAdhanSilenceOnVolumeEnabled(
+                    getApplication<Application>().applicationContext,
+                    enabled
+                )
+            }
+        }
+        viewModelScope.launch {
+            prefs.adhanSilenceOnFlipFlow.collect { enabled ->
+                PrayerScheduleStore.setAdhanSilenceOnFlipEnabled(
+                    getApplication<Application>().applicationContext,
+                    enabled
+                )
+            }
+        }
+        // Lightweight startup check ONLY: read last Mushaf page pref & file existence flag.
+        // Heavy Quran, Tafsir, Hadith, and Muezzin JSON files are NEVER parsed on app startup;
+        // they load strictly on-demand on Dispatchers.IO when the user opens each section.
+        viewModelScope.launch {
+            val appCtx = getApplication<Application>().applicationContext
+            val lastPage = prefs.lastMushafPageFlow.first()
+            val cachedLocally = withContext(Dispatchers.IO) {
+                OfflineQuranRepository.isCachedLocally(appCtx)
+            }
+            _quranState.update {
+                it.copy(
+                    currentMushafPage = lastPage,
+                    lastSavedMushafPage = lastPage,
+                    isMushafCachedOffline = cachedLocally
+                )
+            }
         }
     }
 
@@ -379,22 +568,151 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
     )
 
     fun selectTab(tab: RafiqTab) {
+        val previous = _selectedTab.value
         _selectedTab.value = tab
+
+        // Auto-release heavy in-memory arrays when navigating away so GC frees RAM on 2GB-3GB devices
+        if (previous == RafiqTab.HADITH && tab != RafiqTab.HADITH) {
+            releaseHadithMemory()
+        }
+        if (previous == RafiqTab.AZKAR && tab != RafiqTab.AZKAR) {
+            releaseAzkarMemory()
+        }
+        if (previous == RafiqTab.QURAN && tab != RafiqTab.QURAN && !_quranState.value.isMushafOpen) {
+            releaseMushafMemory()
+        }
+
         if (tab == RafiqTab.QURAN) {
             if (!surahListRequested) loadSurahList()
-            if (!recitersRequested) loadApiReciters()
+            if (offlineMushafBook == null) ensureOfflineMushafLoaded(forceRetry = false)
+        } else if (tab == RafiqTab.AZKAR) {
+            onAzkarTabOpened()
         } else if (tab == RafiqTab.HADITH) {
-            val activeBook = _hadithState.value.selectedBook
-            if (!_hadithState.value.fetchedFromApiBooks.contains(activeBook)) {
-                fetchHadithCollection(activeBook)
+            onHadithLibraryOpened()
+        }
+    }
+
+    private fun onAzkarTabOpened() {
+        if (_azkarState.value.categories.isNotEmpty() || azkarLoadJob?.isActive == true) return
+        val appCtx = getApplication<Application>().applicationContext
+        _azkarState.update { it.copy(isLoading = true) }
+        azkarLoadJob = viewModelScope.launch {
+            val loadedCategories = OfflineAdhkarRepository.loadCategories(appCtx)
+            val savedAzkar = prefs.getAzkarRemaining(todayKey())
+            val defaults = loadedCategories.values.flatten()
+                .associate { it.id to (savedAzkar[it.id] ?: it.requiredCount) }
+            val names = loadedCategories.keys.toList()
+            _azkarState.update { state ->
+                val activeCat = if (loadedCategories.containsKey(state.selectedCategory)) {
+                    state.selectedCategory
+                } else {
+                    names.firstOrNull() ?: state.selectedCategory
+                }
+                state.copy(
+                    categories = loadedCategories,
+                    categoryNames = names,
+                    selectedCategory = activeCat,
+                    remainingCounts = defaults,
+                    isLoading = false
+                )
             }
         }
+    }
+
+    private fun releaseAzkarMemory() {
+        azkarLoadJob?.cancel()
+        azkarLoadJob = null
+        OfflineAdhkarRepository.clearMemoryCache()
+        _azkarState.update {
+            it.copy(
+                categories = emptyMap(),
+                categoryNames = emptyList(),
+                isLoading = false
+            )
+        }
+    }
+
+    private fun releaseHadithMemory() {
+        OfflineHadithRepository.clearMemoryCache()
+        _hadithState.update {
+            it.copy(
+                openBook = null,
+                loadedCollections = emptyMap(),
+                searchQuery = "",
+                visibleCount = 25,
+                expandedUids = emptySet()
+            )
+        }
+    }
+
+    private fun releaseMushafMemory() {
+        TafsirRepository.clearMemoryCache()
+        TajweedEngine.clearCaches()
+        if (!audioState.value.isPlaying && !audioState.value.isBuffering) {
+            QuranTimingRepository.clearMemoryCache()
+        }
+        // Release 604-page text array from RAM unless Ayah-by-Ayah recitation needs page lookup
+        if (!ayahAudioState.value.isPlaying && !ayahAudioState.value.isBuffering &&
+            !audioState.value.isPlaying && !audioState.value.isBuffering
+        ) {
+            offlineMushafBook = null
+            _quranState.update { it.copy(mushafPages = emptyList()) }
+        }
+    }
+
+    fun openAboutCopyright() {
+        _aboutCopyrightOpen.value = true
+    }
+
+    fun closeAboutCopyright() {
+        _aboutCopyrightOpen.value = false
     }
 
     fun toggleDarkMode() {
         viewModelScope.launch {
             prefs.setDarkMode(!darkMode.value)
         }
+    }
+
+    fun setCountdownNotificationEnabled(enabled: Boolean) {
+        val appCtx = getApplication<Application>().applicationContext
+        if (enabled && !PermissionsHelper.isNotificationGranted(appCtx)) {
+            emitToast("يرجى تفعيل إذن الإشعارات أولاً لعرض عدّاد الصلاة القادمة")
+            return
+        }
+        PrayerScheduleStore.setCountdownNotificationEnabled(appCtx, enabled)
+        viewModelScope.launch {
+            prefs.setCountdownNotificationEnabled(enabled)
+        }
+        PrayerCountdownService.syncState(appCtx)
+        emitToast(
+            if (enabled) "تم تفعيل إشعار الوقت المتبقي للصلاة القادمة"
+            else "تم إيقاف إشعار الوقت المتبقي للصلاة القادمة"
+        )
+    }
+
+    fun setAdhanSilenceOnVolume(enabled: Boolean) {
+        val appCtx = getApplication<Application>().applicationContext
+        PrayerScheduleStore.setAdhanSilenceOnVolumeEnabled(appCtx, enabled)
+        viewModelScope.launch {
+            prefs.setAdhanSilenceOnVolume(enabled)
+        }
+        emitToast(
+            if (enabled) "تم تفعيل إيقاف الأذان بأزرار الصوت"
+            else "تم إيقاف ميزة كتم الأذان بأزرار الصوت"
+        )
+    }
+
+    fun setAdhanSilenceOnFlip(enabled: Boolean) {
+        val appCtx = getApplication<Application>().applicationContext
+        PrayerScheduleStore.setAdhanSilenceOnFlipEnabled(appCtx, enabled)
+        viewModelScope.launch {
+            prefs.setAdhanSilenceOnFlip(enabled)
+        }
+        emitToast(
+            if (enabled) "تم تفعيل إيقاف الأذان بقلب الهاتف"
+            else "تم إيقاف ميزة كتم الأذان بقلب الهاتف"
+        )
     }
 
     fun emitToast(message: String) {
@@ -468,6 +786,11 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 if (manual) emitToast("تعذّر الاتصال، تم استخدام المواقيت التقريبية")
             }
+            val appCtx = getApplication<Application>().applicationContext
+            PrayerScheduleStore.saveTimings(appCtx, currentTimings24)
+            PrayerAlarmScheduler.scheduleAllPrayers(appCtx)
+            PrayerCountdownService.syncState(appCtx)
+            refreshFuturePrayerLocks(System.currentTimeMillis())
             startPrayerCountdownLoop()
         }
     }
@@ -548,6 +871,9 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
 
+        // Automatically lock/unlock today's 5 prayers in the daily tracker as real time progresses
+        refreshFuturePrayerLocks(now.timeInMillis)
+
         // Check Smart Fajr Alarm auto-trigger when enabled
         val alarmCfg = fajrAlarmSettings.value
         if (alarmCfg.enabled && !_fajrAlarmRinging.value) {
@@ -569,7 +895,45 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private val trackerPrayerKeyByTaskId = mapOf(
+        "fajr" to "Fajr",
+        "dhuhr" to "Dhuhr",
+        "asr" to "Asr",
+        "maghrib" to "Maghrib",
+        "isha" to "Isha"
+    )
+
+    private fun isPrayerStillInFuture(taskId: String, nowMillis: Long): Boolean {
+        val prayerKey = trackerPrayerKeyByTaskId[taskId] ?: return false
+        val time24 = currentTimings24[prayerKey] ?: return false
+        val prayerMillis = PrayerScheduleStore.parseTodayMillis(time24, nowMillis) ?: return false
+        return nowMillis < prayerMillis
+    }
+
+    private fun refreshFuturePrayerLocks(nowMillis: Long) {
+        val currentList = _worshipTasks.value
+        var changed = false
+        val updated = currentList.map { task ->
+            val locked = isPrayerStillInFuture(task.id, nowMillis)
+            if (task.isLockedFuture != locked) {
+                changed = true
+                task.copy(isLockedFuture = locked)
+            } else {
+                task
+            }
+        }
+        if (changed) {
+            _worshipTasks.value = updated
+        }
+    }
+
     fun toggleWorshipTask(taskId: String) {
+        val nowMillis = System.currentTimeMillis()
+        val target = _worshipTasks.value.find { it.id == taskId } ?: return
+        if (target.isLockedFuture || isPrayerStillInFuture(taskId, nowMillis)) {
+            emitToast("لم يحن وقت ${target.label} بعد")
+            return
+        }
         val updated = _worshipTasks.value.map {
             if (it.id == taskId) it.copy(completed = !it.completed) else it
         }
@@ -584,7 +948,13 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun resetTodayTracker() {
-        _worshipTasks.value = OfflineIslamicData.worshipTasks.map { it.copy(completed = false) }
+        val nowMillis = System.currentTimeMillis()
+        _worshipTasks.value = OfflineIslamicData.worshipTasks.map {
+            it.copy(
+                completed = false,
+                isLockedFuture = isPrayerStillInFuture(it.id, nowMillis)
+            )
+        }
         viewModelScope.launch { prefs.saveTrackerDoneIds(todayKey(), emptySet()) }
         emitToast("تم تصفير ورد اليوم")
     }
@@ -607,23 +977,92 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
         val bm = bookmark.value ?: return
         _selectedTab.value = RafiqTab.QURAN
         if (!surahListRequested) loadSurahList()
-        val matched = _quranState.value.surahs.find { it.number == bm.surahNumber }
-            ?: SurahSummary(
-                number = bm.surahNumber,
-                name = bm.surahName,
-                numberOfAyahs = 0,
-                revelationType = "Meccan"
-            )
-        openSurahReader(matched, scrollToAyah = bm.ayahNumber)
+        val resolvedPage = offlineMushafBook?.findPageForAyah(bm.surahNumber, bm.ayahNumber)
+            ?: if (bm.pageNumber > 1 || bm.surahNumber == 1) bm.pageNumber
+            else _quranState.value.surahStartPages[bm.surahNumber] ?: 1
+        pendingMushafSurah = bm.surahNumber
+        pendingMushafAyah = bm.ayahNumber
+        openMushafAtPage(resolvedPage)
     }
 
     // =========================================================================
-    // MODULE B: QURAN — 114 SURAHS, READER, TAFSIR, BOOKMARK, AUDIO
+    // MODULE B: QURAN — 100% OFFLINE 604-PAGE WAHY MUSHAF + ONLINE AUDIO
     // =========================================================================
+
+    fun ensureOfflineMushafLoaded(forceRetry: Boolean = false) {
+        if (offlineMushafBook != null && !forceRetry) return
+        if (offlineMushafJob?.isActive == true) return
+
+        offlineMushafJob = viewModelScope.launch {
+            val appCtx = getApplication<Application>().applicationContext
+            _quranState.update {
+                it.copy(
+                    isLoadingOfflineMushaf = true,
+                    mushafError = null,
+                    mushafDownloadProgress = if (OfflineQuranRepository.isCachedLocally(appCtx)) {
+                        "جاري فتح المصحف الشريف أوفلاين..."
+                    } else {
+                        "جاري تحميل المصحف الكامل (٦٠٤ صفحة) لمرة واحدة..."
+                    }
+                )
+            }
+
+            val result = OfflineQuranRepository.loadOrDownloadMushaf(appCtx) { status ->
+                _quranState.update { it.copy(mushafDownloadProgress = status) }
+            }
+
+            result.onSuccess { book ->
+                offlineMushafBook = book
+                prefs.cacheSurahs(book.surahs)
+
+                val targetPage = pendingMushafSurah?.let { sNum ->
+                    book.findPageForAyah(sNum, pendingMushafAyah)
+                } ?: _quranState.value.currentMushafPage.coerceIn(1, book.pages.size)
+                pendingMushafSurah = null
+                pendingMushafAyah = 1
+
+                val pageData = book.pages.getOrNull(targetPage - 1)
+                val primarySurah = pageData?.let { pd ->
+                    book.surahs.find { it.number == pd.primarySurahNumber }
+                }
+
+                _quranState.update { state ->
+                    state.copy(
+                        surahs = book.surahs,
+                        isLoadingList = false,
+                        mushafPages = book.pages,
+                        surahStartPages = book.surahStartPages,
+                        juzStartPages = book.juzStartPages,
+                        currentMushafPage = targetPage,
+                        activeSurah = if (state.isMushafOpen) primarySurah ?: state.activeSurah else state.activeSurah,
+                        isLoadingOfflineMushaf = false,
+                        mushafDownloadProgress = null,
+                        mushafError = null,
+                        isMushafCachedOffline = true
+                    )
+                }
+                if (_quranState.value.isMushafOpen && primarySurah != null && !audioState.value.isPlaying) {
+                    audioPlayer.prepareSurahMetadata(primarySurah.number, primarySurah.name)
+                }
+            }.onFailure {
+                _quranState.update {
+                    it.copy(
+                        isLoadingOfflineMushaf = false,
+                        mushafDownloadProgress = null,
+                        mushafError = "تعذّر تحميل نص المصحف الكامل لأول مرة. يرجى الاتصال بالإنترنت ثم الضغط على إعادة المحاولة ليتم حفظه أوفلاين للأبد."
+                    )
+                }
+            }
+        }
+    }
 
     fun loadSurahList() {
         surahListRequested = true
         viewModelScope.launch {
+            offlineMushafBook?.let { book ->
+                _quranState.update { it.copy(surahs = book.surahs, isLoadingList = false) }
+                return@launch
+            }
             _quranState.update { it.copy(isLoadingList = true) }
             val cached = prefs.getCachedSurahs()
             if (!cached.isNullOrEmpty()) {
@@ -640,7 +1079,6 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
                 _quranState.update {
                     it.copy(surahs = OfflineIslamicData.fallbackSurahs, isLoadingList = false)
                 }
-                emitToast("تعذّر الاتصال، تم عرض قائمة سور مختصرة دون إنترنت")
             }
         }
     }
@@ -655,81 +1093,96 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openSurahReader(surah: SurahSummary, scrollToAyah: Int = 1) {
         audioPlayer.prepareSurahMetadata(surah.number, surah.name)
+        val targetPage = offlineMushafBook?.findPageForAyah(surah.number, scrollToAyah)
+            ?: _quranState.value.surahStartPages[surah.number]
+            ?: surah.startPage.coerceIn(1, 604)
+
+        if (offlineMushafBook == null) {
+            pendingMushafSurah = surah.number
+            pendingMushafAyah = scrollToAyah
+            ensureOfflineMushafLoaded(forceRetry = false)
+        }
+
         _quranState.update {
             it.copy(
                 activeSurah = surah,
-                ayahs = emptyList(),
-                isLoadingReader = true,
-                readerError = null,
-                expandedTafsirAyahs = emptySet(),
+                isMushafOpen = true,
+                currentMushafPage = targetPage,
+                lastSavedMushafPage = targetPage,
                 targetScrollAyah = scrollToAyah
             )
         }
+        viewModelScope.launch { prefs.saveLastMushafPage(targetPage) }
+    }
 
-        viewModelScope.launch {
-            try {
-                val response = withContext(Dispatchers.IO) {
-                    IslamicNetworkClient.alQuranApi.getSurahWithTafsir(surah.number)
-                }
-                val uthmani = response.data.getOrNull(0)
-                val tafsir = response.data.getOrNull(1)
-                if (uthmani == null) throw IllegalStateException("Missing edition")
-
-                val updatedSurah = surah.copy(
-                    name = uthmani.name,
-                    numberOfAyahs = uthmani.numberOfAyahs,
-                    revelationType = uthmani.revelationType
+    fun openMushafAtPage(pageNumber: Int) {
+        val safePage = pageNumber.coerceIn(1, 604)
+        val pageData = _quranState.value.mushafPages.getOrNull(safePage - 1)
+        val primarySurah = pageData?.let { pd ->
+            _quranState.value.surahs.find { it.number == pd.primarySurahNumber }
+                ?: SurahSummary(
+                    number = pd.primarySurahNumber,
+                    name = pd.primarySurahName,
+                    numberOfAyahs = 0,
+                    revelationType = "Meccan",
+                    startPage = safePage
                 )
-                val bismillahPrefix = "بِسْمِ ٱللَّهِ ٱلرَّحْمَٰنِ ٱلرَّحِيمِ"
-                val ayahs = uthmani.ayahs.mapIndexed { idx, a ->
-                    var cleanText = a.text
-                    if (surah.number != 1 && surah.number != 9 && a.numberInSurah == 1) {
-                        cleanText = cleanText.removePrefix(bismillahPrefix).trimStart()
-                    }
-                    AyahItem(
-                        numberInSurah = a.numberInSurah,
-                        text = cleanText,
-                        tafsir = tafsir?.ayahs?.getOrNull(idx)?.text.orEmpty(),
-                        globalNumber = a.number,
-                        juz = a.juz.coerceAtLeast(1)
-                    )
-                }
-                _quranState.update {
-                    it.copy(
-                        activeSurah = updatedSurah,
-                        ayahs = ayahs,
-                        isLoadingReader = false,
-                        readerError = null
-                    )
-                }
-            } catch (_: Exception) {
-                val offline = OfflineIslamicData.offlineSurahAyahs[surah.number]
-                if (offline != null) {
-                    _quranState.update {
-                        it.copy(
-                            activeSurah = surah.copy(numberOfAyahs = offline.size),
-                            ayahs = offline,
-                            isLoadingReader = false,
-                            readerError = null
-                        )
-                    }
-                    emitToast("تم فتح السورة من الوضع غير المتصل")
-                } else {
-                    _quranState.update {
-                        it.copy(
-                            isLoadingReader = false,
-                            readerError = "تعذّر تحميل السورة. يرجى التأكد من اتصالك بالإنترنت ثم إعادة المحاولة."
-                        )
-                    }
-                }
-            }
         }
+        if (primarySurah != null && !audioState.value.isPlaying) {
+            audioPlayer.prepareSurahMetadata(primarySurah.number, primarySurah.name)
+        }
+        if (offlineMushafBook == null) {
+            ensureOfflineMushafLoaded(forceRetry = false)
+        }
+        _quranState.update {
+            it.copy(
+                isMushafOpen = true,
+                currentMushafPage = safePage,
+                lastSavedMushafPage = safePage,
+                activeSurah = primarySurah ?: it.activeSurah
+            )
+        }
+        viewModelScope.launch { prefs.saveLastMushafPage(safePage) }
+    }
+
+    fun openMushafAtLastPage() {
+        openMushafAtPage(_quranState.value.lastSavedMushafPage)
+    }
+
+    fun onMushafPageChanged(pageNumber: Int) {
+        val safePage = pageNumber.coerceIn(1, 604)
+        val currentState = _quranState.value
+        val pageData = currentState.mushafPages.getOrNull(safePage - 1)
+        val primarySurah = pageData?.let { pd ->
+            currentState.surahs.find { it.number == pd.primarySurahNumber }
+                ?: SurahSummary(
+                    number = pd.primarySurahNumber,
+                    name = pd.primarySurahName,
+                    numberOfAyahs = 0,
+                    revelationType = "Meccan",
+                    startPage = safePage
+                )
+        }
+        if (primarySurah != null && !audioState.value.isPlaying) {
+            audioPlayer.prepareSurahMetadata(primarySurah.number, primarySurah.name)
+        }
+        _quranState.update {
+            it.copy(
+                currentMushafPage = safePage,
+                lastSavedMushafPage = safePage,
+                activeSurah = primarySurah ?: it.activeSurah
+            )
+        }
+        viewModelScope.launch { prefs.saveLastMushafPage(safePage) }
     }
 
     fun closeSurahReader() {
-        ayahAudioPlayer.stop()
+        // Keep Surah background audio playing if active; release Tafsir & Tajweed RAM immediately
+        TafsirRepository.clearMemoryCache()
+        TajweedEngine.clearCaches()
         _quranState.update {
             it.copy(
+                isMushafOpen = false,
                 activeSurah = null,
                 ayahs = emptyList(),
                 readerError = null,
@@ -739,7 +1192,7 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun updateQuranFontSize(sizeSp: Float) {
-        viewModelScope.launch { prefs.setQuranFontSize(sizeSp.coerceIn(18f, 40f)) }
+        viewModelScope.launch { prefs.setQuranFontSize(sizeSp.coerceIn(18f, 36f)) }
     }
 
     fun selectQuranViewMode(mode: QuranViewMode) {
@@ -750,8 +1203,120 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { prefs.setMushafPaperTheme(theme) }
     }
 
+    fun toggleMushafNightMode() {
+        val nextTheme = if (mushafPaperTheme.value == MushafPaperTheme.NIGHT) {
+            MushafPaperTheme.CREAM
+        } else {
+            MushafPaperTheme.NIGHT
+        }
+        setMushafPaperTheme(nextTheme)
+    }
+
+    fun toggleTajweedColors() {
+        val next = !tajweedColorsEnabled.value
+        viewModelScope.launch { prefs.setTajweedColorsEnabled(next) }
+        emitToast(if (next) "تم تفعيل تلوين أحكام التجويد" else "تم إيقاف تلوين التجويد")
+    }
+
+    fun setQuranPlaybackSpeed(speed: Float) {
+        val safeSpeed = speed.coerceIn(0.5f, 2.0f)
+        audioPlayer.setPlaybackSpeed(safeSpeed)
+        ayahAudioPlayer.setPlaybackSpeed(safeSpeed)
+        viewModelScope.launch { prefs.setQuranPlaybackSpeed(safeSpeed) }
+        emitToast("سرعة التلاوة: ${QuranPlaybackSpeeds.formatLabel(safeSpeed)}")
+    }
+
     fun toggleFullScreenReading() {
         _quranState.update { it.copy(isFullScreenReading = !it.isFullScreenReading) }
+    }
+
+    fun setWordByWordHighlightEnabled(enabled: Boolean) {
+        audioPlayer.setWordByWordEnabled(enabled)
+        viewModelScope.launch { prefs.setWordByWordHighlightEnabled(enabled) }
+        emitToast(if (enabled) "تم تفعيل التظليل كلمة بكلمة" else "تم التبديل إلى تظليل الآية كاملة")
+    }
+
+    fun setSyncLatencyOffsetMs(offsetMs: Int) {
+        val (isBluetooth, clamped) = audioPlayer.setLatencyOffsetForActiveRoute(offsetMs)
+        viewModelScope.launch {
+            if (isBluetooth) {
+                prefs.setSyncOffsetBluetoothMs(clamped)
+            } else {
+                prefs.setSyncOffsetSpeakerMs(clamped)
+            }
+        }
+    }
+
+    fun seekToWordOrAyahWhilePlaying(
+        surahNumber: Int,
+        ayahNumber: Int,
+        wordIndexZeroBased: Int?
+    ): Boolean {
+        return audioPlayer.seekToAyahOrWordIfLoaded(
+            surahNumber = surahNumber,
+            ayahNumber = ayahNumber,
+            wordIndexZeroBased = wordIndexZeroBased
+        )
+    }
+
+    /**
+     * Mode 1: "استماع لهذه الآية فقط" (Play This Ayah Only)
+     * Uses official Quran.com v4 millisecond timestamps on the single seamless Surah MP3
+     * whenever the reciter supports them, stopping cleanly at `timestamp_to` (or repeating).
+     * Smart fallback: for mp3quran.net reciters without official timestamps, plays full Surah cleanly
+     * with highlighting disabled so there is never inaccurate highlighting.
+     */
+    fun playSinglePageAyahOnly(pageAyah: MushafPageAyah) {
+        stopOtherAudio(except = AudioSource.SURAH)
+        if (audioPlayer.hasOfficialTimestampsSupportForCurrentReciter()) {
+            audioPlayer.playSurahFromAyah(
+                surahNumber = pageAyah.surahNumber,
+                surahName = pageAyah.surahName,
+                startAyahNumber = pageAyah.numberInSurah,
+                singleAyahOnly = true,
+                repeatMode = ayahAudioState.value.repeatMode
+            )
+        } else {
+            audioPlayer.playSurah(
+                surahNumber = pageAyah.surahNumber,
+                surahName = pageAyah.surahName,
+                forceRestart = true
+            )
+            emitToast("جاري تشغيل ${pageAyah.surahName} كاملة بصوت ${audioState.value.selectedReciter.arabicName}")
+        }
+    }
+
+    /**
+     * Mode 2: "استماع من هذه الآية" (Continue From Here)
+     * Starts continuous seamless recitation from the exact millisecond `timestamp_from` of the selected Ayah
+     * and automatically advances through following Ayahs, Mushaf pages, and the next Surah.
+     */
+    fun playContinueFromPageAyah(pageAyah: MushafPageAyah) {
+        stopOtherAudio(except = AudioSource.SURAH)
+        val advanceSurah: (Int) -> Unit = { finishedSurah ->
+            if (finishedSurah < 114) {
+                val nextNum = finishedSurah + 1
+                audioPlayer.playSurah(nextNum, resolveSurahName(nextNum), forceRestart = true)
+            }
+        }
+        if (audioPlayer.hasOfficialTimestampsSupportForCurrentReciter()) {
+            audioPlayer.playSurahFromAyah(
+                surahNumber = pageAyah.surahNumber,
+                surahName = pageAyah.surahName,
+                startAyahNumber = pageAyah.numberInSurah,
+                singleAyahOnly = false,
+                repeatMode = AyahRepeatMode.ONCE,
+                onSurahCompleted = advanceSurah
+            )
+        } else {
+            audioPlayer.playSurah(
+                surahNumber = pageAyah.surahNumber,
+                surahName = pageAyah.surahName,
+                forceRestart = true,
+                onSurahCompleted = advanceSurah
+            )
+            emitToast("جاري تشغيل ${pageAyah.surahName} كاملة بصوت ${audioState.value.selectedReciter.arabicName}")
+        }
     }
 
     fun togglePlaySingleAyah(ayah: AyahItem) {
@@ -769,6 +1334,19 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         )
+    }
+
+    private fun findPageAyah(surahNumber: Int, ayahNumber: Int): MushafPageAyah? {
+        val pages = _quranState.value.mushafPages
+        for (page in pages) {
+            for (block in page.blocks) {
+                if (block.surahNumber == surahNumber) {
+                    val found = block.ayahs.find { it.numberInSurah == ayahNumber }
+                    if (found != null) return found
+                }
+            }
+        }
+        return null
     }
 
     fun stopSingleAyahAudio() {
@@ -798,17 +1376,152 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun loadAyahTafsir(
+        surahNumber: Int,
+        ayahNumber: Int,
+        book: TafsirBook = _tafsirState.value.selectedBook
+    ) {
+        tafsirFetchJob?.cancel()
+        val appCtx = getApplication<Application>().applicationContext
+        _tafsirState.update {
+            it.copy(
+                selectedBook = book,
+                currentSurahNumber = surahNumber,
+                currentAyahNumber = ayahNumber,
+                currentText = null,
+                isLoading = true,
+                errorMessage = null
+            )
+        }
+        tafsirFetchJob = viewModelScope.launch {
+            if (!tafsirStatusesLoaded) {
+                tafsirStatusesLoaded = true
+                val downloaded = withContext(Dispatchers.IO) {
+                    TafsirRepository.getDownloadedBookIds(appCtx)
+                }
+                _tafsirState.update { it.copy(downloadedBookIds = downloaded) }
+            }
+            val result = TafsirRepository.getAyahTafsir(
+                context = appCtx,
+                book = book,
+                surahNumber = surahNumber,
+                ayahNumber = ayahNumber
+            )
+            result.onSuccess { text ->
+                _tafsirState.update { state ->
+                    if (state.selectedBook == book &&
+                        state.currentSurahNumber == surahNumber &&
+                        state.currentAyahNumber == ayahNumber
+                    ) {
+                        state.copy(
+                            currentText = text,
+                            isLoading = false,
+                            errorMessage = null
+                        )
+                    } else {
+                        state
+                    }
+                }
+            }.onFailure { err ->
+                _tafsirState.update { state ->
+                    if (state.selectedBook == book &&
+                        state.currentSurahNumber == surahNumber &&
+                        state.currentAyahNumber == ayahNumber
+                    ) {
+                        state.copy(
+                            currentText = null,
+                            isLoading = false,
+                            errorMessage = err.message
+                                ?: "تعذّر تحميل التفسير حالياً. تأكد من الاتصال بالإنترنت أو حمّل التفسير للعمل بدون نت."
+                        )
+                    } else {
+                        state
+                    }
+                }
+            }
+        }
+    }
+
+    fun selectTafsirBook(book: TafsirBook) {
+        val current = _tafsirState.value
+        loadAyahTafsir(
+            surahNumber = current.currentSurahNumber,
+            ayahNumber = current.currentAyahNumber,
+            book = book
+        )
+    }
+
+    fun retryCurrentAyahTafsir() {
+        val current = _tafsirState.value
+        loadAyahTafsir(
+            surahNumber = current.currentSurahNumber,
+            ayahNumber = current.currentAyahNumber,
+            book = current.selectedBook
+        )
+    }
+
+    fun downloadTafsirBookOffline(book: TafsirBook) {
+        if (_tafsirState.value.downloadingProgress.containsKey(book.bookId)) return
+        val appCtx = getApplication<Application>().applicationContext
+        viewModelScope.launch {
+            _tafsirState.update { state ->
+                state.copy(
+                    downloadingProgress = state.downloadingProgress + (book.bookId to 0.02f)
+                )
+            }
+            val result = TafsirRepository.downloadFullBook(appCtx, book) { progress ->
+                _tafsirState.update { state ->
+                    state.copy(
+                        downloadingProgress = state.downloadingProgress + (book.bookId to progress)
+                    )
+                }
+            }
+            result.onSuccess {
+                _tafsirState.update { state ->
+                    state.copy(
+                        downloadedBookIds = state.downloadedBookIds + book.bookId,
+                        downloadingProgress = state.downloadingProgress - book.bookId
+                    )
+                }
+                emitToast("تم تحميل ${book.arabicName} للعمل بدون إنترنت ✓")
+                val latest = _tafsirState.value
+                if (latest.selectedBook == book && latest.currentText.isNullOrBlank()) {
+                    loadAyahTafsir(latest.currentSurahNumber, latest.currentAyahNumber, book)
+                }
+            }.onFailure {
+                _tafsirState.update { state ->
+                    state.copy(
+                        downloadingProgress = state.downloadingProgress - book.bookId
+                    )
+                }
+                emitToast("تعذّر تحميل ${book.arabicName} أوفلاين. يرجى التحقق من الاتصال.")
+            }
+        }
+    }
+
     fun saveQuranBookmark(ayahNumber: Int = 1) {
         val surah = _quranState.value.activeSurah ?: return
+        val pageNum = _quranState.value.currentMushafPage
+        saveMushafPageBookmark(pageNum, surah.number, surah.name, ayahNumber)
+    }
+
+    fun saveMushafPageBookmark(
+        pageNumber: Int,
+        surahNumber: Int,
+        surahName: String,
+        ayahNumber: Int
+    ) {
+        val safePage = pageNumber.coerceIn(1, 604)
         viewModelScope.launch {
             prefs.saveBookmark(
                 QuranBookmark(
-                    surahNumber = surah.number,
-                    surahName = surah.name,
-                    ayahNumber = ayahNumber
+                    surahNumber = surahNumber,
+                    surahName = surahName,
+                    ayahNumber = ayahNumber,
+                    pageNumber = safePage
                 )
             )
-            emitToast("تم حفظ العلامة: ${surah.name} - الآية $ayahNumber")
+            emitToast("تم حفظ العلامة: $surahName • صفحة $safePage")
         }
     }
 
@@ -821,23 +1534,63 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
 
     fun closeReciterLibrary() {
         _reciterLibraryOpen.value = false
+        // Release full reciters list from RAM when modal closes (reloads fast from reciters_cache.json on demand)
+        _apiReciters.value = emptyList()
+        recitersRequested = false
     }
 
     fun loadApiReciters(forceRefresh: Boolean = false) {
         recitersRequested = true
         viewModelScope.launch {
+            val appCtx = getApplication<Application>().applicationContext
             _isRecitersLoading.value = true
             _recitersError.value = null
 
-            if (!forceRefresh) {
-                val cached = prefs.getCachedReciters()
-                if (!cached.isNullOrEmpty()) {
-                    _apiReciters.value = cached
+            // 1. Instant offline load from filesDir/reciters_cache.json when not forcing remote refresh
+            if (!forceRefresh && ReciterRepository.hasLocalCache(appCtx)) {
+                val cachedRepo = ReciterRepository.loadCachedReciters(appCtx)
+                if (cachedRepo.isNotEmpty()) {
+                    _apiReciters.value = cachedRepo
                     _isRecitersLoading.value = false
                     return@launch
                 }
             }
 
+            // 2. Sync from remote GitHub JSON repository (DEFAULT_RECITERS_REPO_URL) & save to reciters_cache.json
+            val repoResult = ReciterRepository.syncRecitersFromRepo(appCtx)
+            if (repoResult.isSuccess) {
+                val repoList = repoResult.getOrNull().orEmpty()
+                if (repoList.isNotEmpty()) {
+                    _apiReciters.value = repoList
+                    prefs.cacheReciters(repoList)
+                    _isRecitersLoading.value = false
+                    if (forceRefresh) {
+                        emitToast("تم تحديث قائمة القراء (${repoList.size} قارئ)")
+                    }
+                    return@launch
+                }
+            }
+
+            // 3. Fallback to local reciters_cache.json or cached MP3Quran list if offline
+            val fallbackFileCache = ReciterRepository.loadCachedReciters(appCtx)
+            if (fallbackFileCache.isNotEmpty()) {
+                _apiReciters.value = fallbackFileCache
+                _isRecitersLoading.value = false
+                if (forceRefresh) {
+                    emitToast("تعذّر الاتصال، تم تحميل قائمة القراء المحفوظة محلياً")
+                }
+                return@launch
+            }
+
+            val legacyCache = prefs.getCachedReciters()
+            if (!legacyCache.isNullOrEmpty()) {
+                _apiReciters.value = legacyCache
+                _isRecitersLoading.value = false
+                if (forceRefresh) emitToast("تعذّر الاتصال، تم استخدام القائمة المحفوظة")
+                return@launch
+            }
+
+            // 4. Secondary remote fallback to MP3Quran API if GitHub repo was unreachable on first launch
             try {
                 val response = withContext(Dispatchers.IO) {
                     IslamicNetworkClient.mp3QuranApi.getReciters("ar")
@@ -871,7 +1624,7 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
                 _isRecitersLoading.value = false
             } catch (_: Exception) {
                 _isRecitersLoading.value = false
-                _recitersError.value = "تعذّر تحميل قائمة MP3Quran، يتم عرض قائمة أشهر القراء"
+                _recitersError.value = "تعذّر تحديث قائمة القراء، يتم عرض قائمة أشهر القراء"
                 if (forceRefresh) emitToast("تعذّر تحديث قائمة القراء، تأكد من الاتصال بالإنترنت")
             }
         }
@@ -937,29 +1690,42 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
         val state = audioState.value
         val surahNum = state.loadedSurahNumber ?: _quranState.value.activeSurah?.number ?: return
         val surahName = state.loadedSurahName.ifBlank { resolveSurahName(surahNum) }
-        val url = state.activeStreamUrl ?: state.selectedReciter.buildPrimaryAudioUrl(surahNum)
-        val padded = surahNum.toString().padStart(3, '0')
-        val fileName = "Quran_${padded}_${state.selectedReciter.id}.mp3"
+        val reciter = state.selectedReciter
+        val url = state.activeStreamUrl ?: reciter.buildPrimaryAudioUrl(surahNum)
+        val downloadKey = "${reciter.id}_$surahNum"
+        val appCtx = getApplication<Application>().applicationContext
 
-        runCatching {
-            val appCtx = getApplication<Application>().applicationContext
-            val dm = appCtx.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-            val request = DownloadManager.Request(Uri.parse(url))
-                .setTitle("$surahName — ${state.selectedReciter.arabicName}")
-                .setDescription("جاري تحميل التلاوة بصيغة MP3")
-                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                .setAllowedOverMetered(true)
-                .setAllowedOverRoaming(true)
+        if (activeSurahAudioDownloads.contains(downloadKey)) {
+            emitToast("جاري تحميل $surahName حالياً...")
+            return
+        }
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
-            } else {
-                request.setDestinationInExternalFilesDir(appCtx, Environment.DIRECTORY_MUSIC, fileName)
+        viewModelScope.launch {
+            val alreadySaved = withContext(Dispatchers.IO) {
+                PersistentOfflineStorage.isSurahAudioDownloaded(appCtx, reciter.id, surahNum)
             }
-            dm.enqueue(request)
-            emitToast("بدأ تحميل $surahName (${state.selectedReciter.arabicName})")
-        }.onFailure {
-            emitToast("تعذّر بدء التحميل، تأكد من الاتصال بالإنترنت")
+            if (alreadySaved) {
+                emitToast("$surahName محفوظة بالفعل أوفلاين على مساحة الجهاز ✓")
+                return@launch
+            }
+
+            activeSurahAudioDownloads.add(downloadKey)
+            emitToast("جاري حفظ $surahName أوفلاين (${reciter.arabicName})...")
+            try {
+                val result = PersistentOfflineStorage.downloadSurahAudioOffline(
+                    context = appCtx,
+                    reciterId = reciter.id,
+                    surahNumber = surahNum,
+                    streamUrl = url
+                )
+                result.onSuccess {
+                    emitToast("تم حفظ $surahName أوفلاين على مساحة الجهاز ✓")
+                }.onFailure {
+                    emitToast("تعذّر تحميل $surahName، تأكد من الاتصال بالإنترنت")
+                }
+            } finally {
+                activeSurahAudioDownloads.remove(downloadKey)
+            }
         }
     }
 
@@ -996,7 +1762,8 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
 
     fun resetCurrentAzkarCategory() {
         val category = _azkarState.value.selectedCategory
-        val items = OfflineIslamicData.azkarCategories[category].orEmpty()
+        val items = _azkarState.value.categories[category]
+            ?: OfflineIslamicData.azkarCategories[category].orEmpty()
         val updated = _azkarState.value.remainingCounts.toMutableMap()
         items.forEach { updated[it.id] = it.requiredCount }
         _azkarState.update { it.copy(remainingCounts = updated) }
@@ -1053,100 +1820,207 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // =========================================================================
-    // MODULE D: UPGRADED HADITH LIBRARY (4 COLLECTIONS + JSDELIVR API)
+    // MODULE D: OFFLINE HADITH LIBRARY (8 AUTHENTIC BOOKS + DOWNLOAD MANAGER)
     // =========================================================================
 
-    fun selectHadithBook(book: HadithBookCollection) {
-        _hadithState.update {
-            it.copy(
-                selectedBook = book,
-                visibleCount = 30,
-                bookLoadNotice = null
-            )
-        }
-        if (!_hadithState.value.fetchedFromApiBooks.contains(book)) {
-            fetchHadithCollection(book)
+    private var hadithNawawiAutoTried = false
+
+    fun onHadithLibraryOpened() {
+        val appCtx = getApplication<Application>().applicationContext
+        viewModelScope.launch {
+            val statuses = withContext(Dispatchers.IO) {
+                OfflineHadithRepository.getAllBookStatuses(appCtx)
+            }
+            if (!hadithFavoritesLoaded) {
+                hadithFavoritesLoaded = true
+                val savedFavorites = OfflineHadithRepository.loadSavedFavorites(appCtx)
+                _hadithState.update {
+                    it.copy(bookStatuses = statuses, savedFavoriteHadiths = savedFavorites)
+                }
+            } else {
+                _hadithState.update { it.copy(bookStatuses = statuses) }
+            }
+
+            // Auto-download/cache الأربعون النووية (ara-nawawi.min.json) on first open so it's ready offline immediately
+            val nawawiDownloaded = statuses[HadithBookCollection.NAWAWI.id]?.isDownloaded == true
+            if (!nawawiDownloaded && !hadithNawawiAutoTried) {
+                hadithNawawiAutoTried = true
+                downloadHadithBookOffline(HadithBookCollection.NAWAWI, isAutoFirstOpen = true)
+            }
         }
     }
 
-    fun fetchHadithCollection(book: HadithBookCollection) {
-        viewModelScope.launch {
-            _hadithState.update { it.copy(isLoadingBook = true, bookLoadNotice = null) }
-            try {
-                val response = withContext(Dispatchers.IO) {
-                    IslamicNetworkClient.hadithCdnApi.getCollection(book.apiEdition)
-                }
-                val sections = response.metadata?.sections.orEmpty()
-                val offlineLookup = HadithLibraryData.offlineForBook(book).associateBy { it.number }
-                val mapped = response.hadiths
-                    .asSequence()
-                    .filter { !it.text.isNullOrBlank() }
-                    .mapIndexed { idx, entry ->
-                        val num = entry.hadithnumber.toInt().takeIf { it > 0 } ?: (idx + 1)
-                        val rawText = entry.text.orEmpty().trim()
-                        val sectionKey = entry.reference?.book?.toString().orEmpty()
-                        val sectionName = sections[sectionKey].orEmpty()
-                        val offlineMatch = offlineLookup[num]
-                        LibraryHadith(
-                            uid = "${book.id}_$num",
-                            book = book,
-                            number = num,
-                            chapter = offlineMatch?.chapter ?: HadithChapters.classifyChapter(rawText, sectionName),
-                            title = offlineMatch?.title ?: sectionName,
-                            narrator = offlineMatch?.narrator.orEmpty(),
-                            text = rawText,
-                            explanation = offlineMatch?.explanation.orEmpty(),
-                            source = "${book.arabicTitle} • حديث رقم $num"
-                        )
-                    }
-                    .distinctBy { it.uid }
-                    .toList()
+    fun selectHadithSubTab(subTab: Int) {
+        _hadithState.update {
+            it.copy(
+                activeSubTab = subTab.coerceIn(0, 1),
+                openBook = null
+            )
+        }
+    }
 
-                if (mapped.isNotEmpty()) {
+    fun openHadithBook(book: HadithBookCollection) {
+        val appCtx = getApplication<Application>().applicationContext
+        val savedResume = lastHadithResume.value
+        val resumeIndex = if (savedResume?.first == book) savedResume.second else 0
+        val initialVisible = maxOf(25, resumeIndex + 15)
+        _hadithState.update {
+            it.copy(
+                openBook = book,
+                searchQuery = "",
+                visibleCount = initialVisible,
+                bookError = null
+            )
+        }
+        viewModelScope.launch {
+            prefs.saveLastHadithReadingPosition(book.id, resumeIndex)
+        }
+
+        val alreadyInMemory = _hadithState.value.loadedCollections[book]
+        if (!alreadyInMemory.isNullOrEmpty()) return
+
+        viewModelScope.launch {
+            val isDownloaded = withContext(Dispatchers.IO) {
+                OfflineHadithRepository.isBookDownloaded(appCtx, book)
+            }
+            if (isDownloaded) {
+                _hadithState.update { it.copy(isLoadingBook = true, bookError = null) }
+                val res = OfflineHadithRepository.loadBookFromLocalStorage(appCtx, book)
+                res.onSuccess { list ->
+                    val refreshedStatuses = withContext(Dispatchers.IO) {
+                        OfflineHadithRepository.getAllBookStatuses(appCtx)
+                    }
                     _hadithState.update { state ->
-                        val updatedMap = state.loadedCollections.toMutableMap().apply {
-                            put(book, mapped)
-                        }
+                        // Keep ONLY the currently open Hadith book in RAM to protect 2GB-3GB devices
                         state.copy(
-                            loadedCollections = updatedMap,
-                            fetchedFromApiBooks = state.fetchedFromApiBooks + book,
+                            loadedCollections = mapOf(book to list),
+                            bookStatuses = refreshedStatuses,
                             isLoadingBook = false,
-                            bookLoadNotice = null
+                            bookError = null
                         )
                     }
-                } else {
+                }.onFailure { err ->
                     _hadithState.update {
                         it.copy(
                             isLoadingBook = false,
-                            bookLoadNotice = "تم عرض المختارات المحفوظة محلياً"
+                            bookError = err.message ?: "تعذّر فتح الملف المحلي للكتاب"
                         )
                     }
                 }
-            } catch (_: Exception) {
-                _hadithState.update {
-                    it.copy(
-                        isLoadingBook = false,
-                        bookLoadNotice = "وضع عدم الاتصال: يتم عرض المختارات الموثقة لـ ${book.arabicTitle}"
+            } else if (book.autoDownloadOnFirstOpen && !_hadithState.value.downloadingProgress.containsKey(book.id)) {
+                downloadHadithBookOffline(book, isAutoFirstOpen = true)
+            }
+        }
+    }
+
+    fun closeHadithBook() {
+        // Immediately release the loaded Hadith book array from memory so GC frees RAM
+        OfflineHadithRepository.clearMemoryCache()
+        _hadithState.update {
+            it.copy(
+                openBook = null,
+                loadedCollections = emptyMap(),
+                searchQuery = "",
+                visibleCount = 25,
+                expandedUids = emptySet(),
+                bookError = null
+            )
+        }
+    }
+
+    fun saveHadithScrollIndex(book: HadithBookCollection, firstVisibleIndex: Int) {
+        if (firstVisibleIndex < 0) return
+        viewModelScope.launch {
+            prefs.saveLastHadithReadingPosition(book.id, firstVisibleIndex)
+        }
+    }
+
+    fun downloadHadithBookOffline(
+        book: HadithBookCollection,
+        isAutoFirstOpen: Boolean = false
+    ) {
+        if (_hadithState.value.downloadingProgress.containsKey(book.id)) return
+        val appCtx = getApplication<Application>().applicationContext
+
+        viewModelScope.launch {
+            _hadithState.update { state ->
+                state.copy(
+                    downloadingProgress = state.downloadingProgress + (book.id to 0.02f),
+                    bookError = null
+                )
+            }
+            val result = OfflineHadithRepository.downloadBookOffline(appCtx, book) { progress ->
+                _hadithState.update { state ->
+                    state.copy(
+                        downloadingProgress = state.downloadingProgress + (book.id to progress)
                     )
+                }
+            }
+            result.onSuccess { parsedList ->
+                val refreshedStatuses = withContext(Dispatchers.IO) {
+                    OfflineHadithRepository.getAllBookStatuses(appCtx)
+                }
+                _hadithState.update { state ->
+                    state.copy(
+                        loadedCollections = if (state.openBook == book) mapOf(book to parsedList) else state.loadedCollections,
+                        bookStatuses = refreshedStatuses,
+                        downloadingProgress = state.downloadingProgress - book.id,
+                        isLoadingBook = false,
+                        bookError = null
+                    )
+                }
+                emitToast("تم تحميل ${book.arabicTitle} بنجاح (${parsedList.size} حديث) • متاح بدون نت ✓")
+            }.onFailure { err ->
+                _hadithState.update { state ->
+                    state.copy(
+                        downloadingProgress = state.downloadingProgress - book.id,
+                        isLoadingBook = false,
+                        bookError = if (state.openBook == book) {
+                            err.message ?: "تعذّر التحميل، تأكد من الاتصال بالإنترنت ثم حاول مجدداً"
+                        } else {
+                            state.bookError
+                        }
+                    )
+                }
+                if (!isAutoFirstOpen) {
+                    emitToast("تعذّر تحميل ${book.arabicTitle}. يرجى التحقق من الاتصال بالإنترنت.")
                 }
             }
         }
     }
 
+    fun deleteHadithBookOffline(book: HadithBookCollection) {
+        val appCtx = getApplication<Application>().applicationContext
+        viewModelScope.launch {
+            OfflineHadithRepository.deleteBookOffline(appCtx, book)
+            val refreshedStatuses = withContext(Dispatchers.IO) {
+                OfflineHadithRepository.getAllBookStatuses(appCtx)
+            }
+            _hadithState.update { state ->
+                state.copy(
+                    loadedCollections = state.loadedCollections - book,
+                    bookStatuses = refreshedStatuses,
+                    openBook = if (state.openBook == book) null else state.openBook
+                )
+            }
+            emitToast("تم حذف ${book.arabicTitle} لتوفير مساحة التخزين")
+        }
+    }
+
     fun updateHadithSearch(query: String) {
-        _hadithState.update { it.copy(searchQuery = query, visibleCount = 30) }
+        _hadithState.update { it.copy(searchQuery = query, visibleCount = 25) }
     }
 
-    fun toggleHadithSearchAllBooks(searchAll: Boolean) {
-        _hadithState.update { it.copy(searchAllBooks = searchAll, visibleCount = 30) }
+    fun updateHadithFavoritesSearch(query: String) {
+        _hadithState.update { it.copy(favoritesSearchQuery = query) }
     }
 
-    fun selectHadithChapter(chapter: String) {
-        _hadithState.update { it.copy(selectedChapter = chapter, visibleCount = 30) }
+    fun toggleHadithFontFamily() {
+        _hadithState.update { it.copy(useCairoFont = !it.useCairoFont) }
     }
 
     fun loadMoreHadiths() {
-        _hadithState.update { it.copy(visibleCount = it.visibleCount + 30) }
+        _hadithState.update { it.copy(visibleCount = it.visibleCount + 25) }
     }
 
     fun toggleHadithExplanation(hadithUid: String) {
@@ -1160,12 +2034,22 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun toggleFavoriteHadith(hadithUid: String) {
+    fun toggleFavoriteHadith(hadith: LibraryHadith) {
+        val appCtx = getApplication<Application>().applicationContext
         viewModelScope.launch {
-            val current = favoriteHadithUids.value
-            val added = !current.contains(hadithUid)
-            val next = if (added) current + hadithUid else current - hadithUid
-            prefs.saveFavoriteHadithUids(next)
+            val currentUids = favoriteHadithUids.value
+            val added = !currentUids.contains(hadith.uid)
+            val nextUids = if (added) currentUids + hadith.uid else currentUids - hadith.uid
+            prefs.saveFavoriteHadithUids(nextUids)
+
+            val currentList = _hadithState.value.savedFavoriteHadiths
+            val nextList = if (added) {
+                listOf(hadith) + currentList.filterNot { it.uid == hadith.uid }
+            } else {
+                currentList.filterNot { it.uid == hadith.uid }
+            }
+            _hadithState.update { it.copy(savedFavoriteHadiths = nextList) }
+            OfflineHadithRepository.saveFavorites(appCtx, nextList)
             emitToast(if (added) "تم حفظ الحديث في المفضلة" else "تمت إزالة الحديث من المفضلة")
         }
     }
@@ -1223,10 +2107,91 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openMuezzinLibrary() {
         _muezzinLibraryOpen.value = true
+        val appCtx = getApplication<Application>().applicationContext
+        viewModelScope.launch {
+            _cachedAdhanIds.value = withContext(Dispatchers.IO) {
+                MuezzinRepository.getAllCachedAdhanIds(appCtx)
+            }
+            if (!muezzinCatalogLoaded) {
+                muezzinCatalogLoaded = true
+                if (withContext(Dispatchers.IO) { MuezzinRepository.hasCatalogCache(appCtx) }) {
+                    val cachedList = MuezzinRepository.loadCachedCatalog(appCtx)
+                    if (cachedList.isNotEmpty()) {
+                        _repoMuezzins.value = cachedList
+                        _muezzinRepoStatus.value = "محفوظ محلياً (${cachedList.size} مؤذن)"
+                    } else {
+                        syncMuezzinRepo(isAutoFirstLaunch = true)
+                    }
+                } else {
+                    syncMuezzinRepo(isAutoFirstLaunch = true)
+                }
+            }
+        }
     }
 
     fun closeMuezzinLibrary() {
         _muezzinLibraryOpen.value = false
+    }
+
+    fun syncMuezzinRepo(isAutoFirstLaunch: Boolean = false) {
+        if (_isSyncingMuezzinRepo.value) return
+        viewModelScope.launch {
+            _isSyncingMuezzinRepo.value = true
+            val appCtx = getApplication<Application>().applicationContext
+            val result = MuezzinRepository.syncCatalogFromRemote(appCtx)
+            result.onSuccess { syncedList ->
+                _repoMuezzins.value = syncedList
+                _cachedAdhanIds.value = withContext(Dispatchers.IO) {
+                    MuezzinRepository.getAllCachedAdhanIds(appCtx)
+                }
+                _muezzinRepoStatus.value = "تم التحديث (${syncedList.size} مؤذن)"
+                emitToast("تم تحديث قائمة المؤذنين: تم تحميل ${syncedList.size} مؤذناً")
+            }.onFailure {
+                // Cleanly fall back to offline cache without crashing
+                val cached = MuezzinRepository.loadCachedCatalog(appCtx)
+                if (cached.isNotEmpty()) {
+                    _repoMuezzins.value = cached
+                    _muezzinRepoStatus.value = "وضع عدم الاتصال — نسخة محفوظة (${cached.size} مؤذن)"
+                } else {
+                    _muezzinRepoStatus.value = "تعذّر الاتصال — يتم عرض القائمة المدمجة"
+                }
+                if (!isAutoFirstLaunch) {
+                    emitToast(
+                        if (cached.isNotEmpty()) {
+                            "تعذّر التحديث — تم تحميل ${cached.size} مؤذناً من النسخة المحفوظة"
+                        } else {
+                            "تعذّر التحديث، تأكد من الاتصال بالإنترنت"
+                        }
+                    )
+                }
+            }
+            _isSyncingMuezzinRepo.value = false
+        }
+    }
+
+    fun downloadMuezzinForOffline(muezzin: MuezzinItem) {
+        val url = muezzin.primaryUrl.trim()
+        if (url.isBlank()) {
+            emitToast("لا يوجد رابط MP3 مباشر لهذا المؤذن للتحميل")
+            return
+        }
+        if (_downloadingMuezzinIds.value.contains(muezzin.id)) return
+
+        viewModelScope.launch {
+            _downloadingMuezzinIds.update { it + muezzin.id }
+            val appCtx = getApplication<Application>().applicationContext
+            val result = MuezzinRepository.downloadAdhanMp3(appCtx, muezzin.id, url)
+            _downloadingMuezzinIds.update { it - muezzin.id }
+
+            result.onSuccess {
+                _cachedAdhanIds.value = withContext(Dispatchers.IO) {
+                    MuezzinRepository.getAllCachedAdhanIds(appCtx)
+                }
+                emitToast("تم تحميل أذان ${muezzin.name} للتشغيل بدون إنترنت ✓")
+            }.onFailure {
+                emitToast("تعذّر تحميل صوت ${muezzin.name}، تأكد من الاتصال بالإنترنت")
+            }
+        }
     }
 
     fun toggleAdhanPreview(muezzin: MuezzinItem) {
@@ -1316,6 +2281,11 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
             if (adhanState.value.activeMuezzinId == muezzin.id) {
                 adhanPlayer.stop()
             }
+            val appCtx = getApplication<Application>().applicationContext
+            withContext(Dispatchers.IO) {
+                MuezzinRepository.deleteCachedAdhan(appCtx, muezzin.id)
+                _cachedAdhanIds.value = MuezzinRepository.getAllCachedAdhanIds(appCtx)
+            }
             if (muezzin.isCustom) {
                 // Clean up old local file if replacing a file-based custom muezzin
                 muezzin.localFilePath?.let { path ->
@@ -1356,7 +2326,7 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
             val savedPath = withContext(Dispatchers.IO) {
                 runCatching {
                     val appCtx = getApplication<Application>().applicationContext
-                    val dir = File(appCtx.filesDir, "custom_adhans").apply { mkdirs() }
+                    val dir = PersistentOfflineStorage.adhanCustomDir(appCtx)
                     val outFile = File(dir, "override_${muezzin.id}_${System.currentTimeMillis()}.mp3")
                     appCtx.contentResolver.openInputStream(uri)?.use { input ->
                         outFile.outputStream().use { output ->
@@ -1437,7 +2407,7 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
             val savedPath = withContext(Dispatchers.IO) {
                 runCatching {
                     val appCtx = getApplication<Application>().applicationContext
-                    val dir = File(appCtx.filesDir, "custom_adhans").apply { mkdirs() }
+                    val dir = PersistentOfflineStorage.adhanCustomDir(appCtx)
                     val outFile = File(dir, "adhan_${System.currentTimeMillis()}.mp3")
                     appCtx.contentResolver.openInputStream(uri)?.use { input ->
                         outFile.outputStream().use { output ->
@@ -1528,13 +2498,146 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
         emitToast("بارك الله فيك! تم إيقاف منبه الفجر — تقبل الله صلاتك")
     }
 
+    // =========================================================================
+    // MODULE H: IN-APP DIRECT AUTO-UPDATE (التحديث التلقائي المباشر داخل التطبيق)
+    // =========================================================================
+
+    fun checkForAppUpdate(manual: Boolean) {
+        val current = _appUpdateState.value
+        if (current.isChecking || current.stage == AppUpdateDialogStage.DOWNLOADING) return
+
+        viewModelScope.launch {
+            _appUpdateState.update { it.copy(isChecking = true) }
+            val appCtx = getApplication<Application>().applicationContext
+            val result = AppUpdateManager.checkForNewerRelease(
+                context = appCtx,
+                currentVersionName = BuildConfig.VERSION_NAME
+            )
+            result.onSuccess { release ->
+                if (release != null) {
+                    _appUpdateState.update {
+                        it.copy(
+                            isChecking = false,
+                            availableRelease = release,
+                            stage = AppUpdateDialogStage.UPDATE_AVAILABLE,
+                            errorMessage = null
+                        )
+                    }
+                } else {
+                    _appUpdateState.update { it.copy(isChecking = false) }
+                    if (manual) {
+                        emitToast("التطبيق محدّث لآخر إصدار (${BuildConfig.VERSION_NAME})")
+                    }
+                }
+            }.onFailure {
+                _appUpdateState.update { it.copy(isChecking = false) }
+                if (manual) {
+                    emitToast("تعذّر التحقق من التحديثات، تأكد من الاتصال بالإنترنت")
+                }
+            }
+        }
+    }
+
+    fun startAppUpdateDownload() {
+        val release = _appUpdateState.value.availableRelease ?: return
+        appUpdateDownloadJob?.cancel()
+        appUpdateDownloadJob = viewModelScope.launch {
+            _appUpdateState.update {
+                it.copy(
+                    stage = AppUpdateDialogStage.DOWNLOADING,
+                    downloadedBytes = 0L,
+                    totalBytes = release.assetSizeBytes,
+                    progressPercent = 0,
+                    errorMessage = null
+                )
+            }
+            val appCtx = getApplication<Application>().applicationContext
+            val result = AppUpdateManager.downloadUpdateApk(
+                context = appCtx,
+                downloadUrl = release.downloadUrl,
+                expectedSizeBytes = release.assetSizeBytes,
+                onProgress = { progress ->
+                    _appUpdateState.update { state ->
+                        if (state.stage == AppUpdateDialogStage.DOWNLOADING) {
+                            state.copy(
+                                downloadedBytes = progress.downloadedBytes,
+                                totalBytes = progress.totalBytes,
+                                progressPercent = progress.progressPercent
+                            )
+                        } else {
+                            state
+                        }
+                    }
+                }
+            )
+
+            result.onSuccess { apkFile ->
+                _appUpdateState.update {
+                    it.copy(
+                        stage = AppUpdateDialogStage.READY_TO_INSTALL,
+                        downloadedApkFile = apkFile,
+                        progressPercent = 100
+                    )
+                }
+            }.onFailure { err ->
+                _appUpdateState.update {
+                    it.copy(
+                        stage = AppUpdateDialogStage.ERROR,
+                        errorMessage = err.message ?: "تعذّر تحميل ملف التحديث، تأكد من الاتصال بالإنترنت"
+                    )
+                }
+            }
+        }
+    }
+
+    fun cancelAppUpdateDownload() {
+        appUpdateDownloadJob?.cancel()
+        appUpdateDownloadJob = null
+        _appUpdateState.update {
+            it.copy(
+                stage = AppUpdateDialogStage.NONE,
+                downloadedBytes = 0L,
+                totalBytes = -1L,
+                progressPercent = 0
+            )
+        }
+        emitToast("تم إلغاء تحميل التحديث")
+    }
+
+    fun markInstallPermissionRequired() {
+        _appUpdateState.update { it.copy(stage = AppUpdateDialogStage.INSTALL_PERMISSION_REQUIRED) }
+    }
+
+    fun installDownloadedApk(apkFile: File) {
+        val appCtx = getApplication<Application>().applicationContext
+        val launched = AppUpdateManager.launchApkInstaller(appCtx, apkFile)
+        launched.onSuccess {
+            _appUpdateState.update { it.copy(stage = AppUpdateDialogStage.NONE) }
+        }.onFailure {
+            _appUpdateState.update {
+                it.copy(
+                    stage = AppUpdateDialogStage.ERROR,
+                    errorMessage = "تعذّر فتح مثبّت التطبيقات، يرجى المحاولة مرة أخرى"
+                )
+            }
+        }
+    }
+
+    fun dismissAppUpdateDialog() {
+        if (_appUpdateState.value.stage == AppUpdateDialogStage.DOWNLOADING) return
+        _appUpdateState.update { it.copy(stage = AppUpdateDialogStage.NONE, errorMessage = null) }
+    }
+
     override fun onCleared() {
         super.onCleared()
         countdownJob?.cancel()
-        audioPlayer.stopAndRelease(keepReciter = false)
-        ayahAudioPlayer.stop()
-        adhanPlayer.stop()
+        appUpdateDownloadJob?.cancel()
+        // Do NOT kill active background Quran or Adhan foreground services on ViewModel clear
+        // so playback survives Activity recreation / backgrounding; free heavy RAM caches only.
         fajrAlarmPlayer.stopRinging()
+        TafsirRepository.clearMemoryCache()
+        TajweedEngine.clearCaches()
+        QuranTimingRepository.clearMemoryCache()
     }
 
     // ---- Helpers ----

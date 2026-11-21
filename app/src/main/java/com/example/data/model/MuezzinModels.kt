@@ -50,6 +50,7 @@ enum class AdhanPlaybackStatus(val arabicLabel: String) {
     IDLE(""),
     LOADING("جاري التحميل..."),
     PLAYING("يعمل الآن"),
+    PAUSED("متوقف مؤقتاً"),
     FALLBACK_PLAYING("يعمل (بث بديل)"),
     ERROR("تعذر التشغيل")
 }

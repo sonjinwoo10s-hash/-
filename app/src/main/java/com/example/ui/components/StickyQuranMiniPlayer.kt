@@ -39,12 +39,22 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.unit.sp
 import com.example.audio.AudioPlayerState
+import com.example.audio.QuranPlaybackSpeeds
 import com.example.ui.theme.DeepGreen
 import com.example.ui.theme.EmeraldGreen
 import com.example.ui.theme.SoftGold
@@ -57,12 +67,15 @@ fun StickyQuranMiniPlayer(
     onPreviousSurah: () -> Unit,
     onNextSurah: () -> Unit,
     onSeek: (Float) -> Unit,
+    onSelectPlaybackSpeed: (Float) -> Unit,
     onDownloadMp3: () -> Unit,
     onOpenReciterLibrary: () -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val surahNum = audioState.loadedSurahNumber ?: return
+    val view = LocalView.current
+    var showSpeedChips by remember { mutableStateOf(false) }
 
     Surface(
         modifier = modifier
@@ -120,7 +133,45 @@ fun StickyQuranMiniPlayer(
                     }
                 }
 
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    // Playback Speed Toggle Pill (e.g., 1.0x)
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (showSpeedChips || audioState.playbackSpeed != 1.0f) {
+                            SoftGold
+                        } else {
+                            Color.White.copy(alpha = 0.16f)
+                        },
+                        border = BorderStroke(
+                            1.dp,
+                            if (showSpeedChips || audioState.playbackSpeed != 1.0f) {
+                                SoftGold
+                            } else {
+                                Color.White.copy(alpha = 0.3f)
+                            }
+                        ),
+                        modifier = Modifier
+                            .testTag("mini_player_speed_button")
+                            .clickable { showSpeedChips = !showSpeedChips }
+                    ) {
+                        CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                            Text(
+                                text = QuranPlaybackSpeeds.formatLabel(audioState.playbackSpeed),
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
+                                fontWeight = FontWeight.ExtraBold,
+                                color = if (showSpeedChips || audioState.playbackSpeed != 1.0f) {
+                                    Color(0xFF1A1405)
+                                } else {
+                                    Color.White
+                                },
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
+                            )
+                        }
+                    }
+
                     IconButton(
                         onClick = onDownloadMp3,
                         modifier = Modifier
@@ -147,6 +198,55 @@ fun StickyQuranMiniPlayer(
                             tint = Color.White.copy(alpha = 0.85f),
                             modifier = Modifier.size(18.dp)
                         )
+                    }
+                }
+            }
+
+            // Expandable Quick Playback Speed Chip Selector (0.5x .. 2.0x)
+            AnimatedVisibility(visible = showSpeedChips) {
+                Column(modifier = Modifier.padding(top = 6.dp, bottom = 4.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "سرعة التلاوة:",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFFF6DC97)
+                        )
+                        LazyRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            items(QuranPlaybackSpeeds.options) { speed ->
+                                val selected = audioState.playbackSpeed == speed
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = if (selected) SoftGold else Color.White.copy(alpha = 0.14f),
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (selected) SoftGold else Color.White.copy(alpha = 0.25f)
+                                    ),
+                                    modifier = Modifier
+                                        .testTag("mini_speed_chip_${QuranPlaybackSpeeds.formatLabel(speed)}")
+                                        .clickable {
+                                            onSelectPlaybackSpeed(speed)
+                                            showSpeedChips = false
+                                        }
+                                ) {
+                                    CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                                        Text(
+                                            text = QuranPlaybackSpeeds.formatLabel(speed),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = if (selected) Color(0xFF1A1405) else Color.White,
+                                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -179,7 +279,10 @@ fun StickyQuranMiniPlayer(
                         .clip(CircleShape)
                         .background(SoftGold)
                         .testTag("mini_player_play_pause")
-                        .clickable(onClick = onTogglePlay),
+                        .clickable {
+                            performKeyTapHaptic(view)
+                            onTogglePlay()
+                        },
                     contentAlignment = Alignment.Center
                 ) {
                     if (audioState.isBuffering) {

@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -33,7 +34,10 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CloudDone
+import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Favorite
@@ -42,6 +46,7 @@ import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.NightsStay
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Stop
@@ -66,11 +71,13 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -90,6 +97,8 @@ import com.example.ui.theme.DeepGreen
 import com.example.ui.theme.EmeraldGreen
 import com.example.ui.theme.LocalIslamicColors
 import com.example.ui.theme.SoftGold
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
 
 @Composable
 fun MuezzinLibraryModal(
@@ -99,7 +108,13 @@ fun MuezzinLibraryModal(
     useDedicatedFajrAdhan: Boolean,
     favoriteIds: Set<String>,
     adhanState: AdhanPlayerState,
+    isSyncingRepo: Boolean,
+    repoStatusMessage: String?,
+    cachedAdhanIds: Set<String>,
+    downloadingMuezzinIds: Set<String>,
     onClose: () -> Unit,
+    onSyncRepo: () -> Unit,
+    onDownloadOffline: (MuezzinItem) -> Unit,
     onTogglePreview: (MuezzinItem) -> Unit,
     onSwitchFallbackStream: () -> Unit,
     onRetryAdhan: () -> Unit,
@@ -118,12 +133,19 @@ fun MuezzinLibraryModal(
 
     val islamic = LocalIslamicColors.current
     var searchQuery by remember { mutableStateOf("") }
+    var debouncedQuery by remember { mutableStateOf("") }
     var selectedRegion by remember { mutableStateOf(MuezzinRegion.ALL) }
     var showAddDialog by remember { mutableStateOf(false) }
     var editingAudioMuezzin by remember { mutableStateOf<MuezzinItem?>(null) }
 
-    val normalizedQuery = remember(searchQuery) {
-        OfflineIslamicData.normalizeArabic(searchQuery)
+    // 300ms debounce so search stays smooth on low-end devices
+    LaunchedEffect(searchQuery) {
+        delay(300L)
+        debouncedQuery = searchQuery
+    }
+
+    val normalizedQuery = remember(debouncedQuery) {
+        OfflineIslamicData.normalizeArabic(debouncedQuery)
     }
 
     val filteredMuezzins = remember(allMuezzins, selectedRegion, normalizedQuery, favoriteIds) {
@@ -141,6 +163,25 @@ fun MuezzinLibraryModal(
                 OfflineIslamicData.normalizeArabic(item.regionEnum().label).contains(normalizedQuery)
             matchRegion && matchSearch
         }
+    }
+
+    // Paginate Muezzin list: render 25 items initially and auto-load +25 on scroll
+    var visibleCount by remember(selectedRegion, normalizedQuery, allMuezzins.size) {
+        mutableIntStateOf(25)
+    }
+    val pagedMuezzins = remember(filteredMuezzins, visibleCount) {
+        filteredMuezzins.take(visibleCount)
+    }
+    val listState = rememberLazyListState()
+    LaunchedEffect(listState, filteredMuezzins.size, visibleCount) {
+        snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }
+            .distinctUntilChanged()
+            .collect { lastVisible ->
+                val totalVisibleItems = listState.layoutInfo.totalItemsCount
+                if (visibleCount < filteredMuezzins.size && totalVisibleItems > 0 && lastVisible >= totalVisibleItems - 5) {
+                    visibleCount = (visibleCount + 25).coerceAtMost(filteredMuezzins.size)
+                }
+            }
     }
 
     val activeDefaultMuezzin = allMuezzins.find { it.id == defaultMuezzinId }
@@ -242,12 +283,71 @@ fun MuezzinLibraryModal(
                     .fillMaxSize()
                     .padding(horizontal = 16.dp)
             ) {
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Clean Refresh Button
+                Button(
+                    onClick = onSyncRepo,
+                    enabled = !isSyncingRepo,
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = Color.White,
+                        disabledContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.65f),
+                        disabledContentColor = Color.White
+                    ),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("sync_muezzin_repo_button")
+                ) {
+                    if (isSyncingRepo) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                            color = Color(0xFFF6DC97)
+                        )
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = "تحديث",
+                            tint = Color(0xFFF6DC97),
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = if (isSyncingRepo) {
+                                "جاري التحديث..."
+                            } else {
+                                "تحديث"
+                            },
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color.White,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        if (!repoStatusMessage.isNullOrBlank()) {
+                            Text(
+                                text = repoStatusMessage,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFFF6DC97),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
 
                 // Current Default & Fajr Summary Strip
                 Card(
                     shape = RoundedCornerShape(16.dp),
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
                     border = BorderStroke(1.dp, islamic.border),
                     modifier = Modifier.fillMaxWidth()
                 ) {
@@ -478,7 +578,7 @@ fun MuezzinLibraryModal(
                         }
                     }
                 } else {
-                    val groupedByRegion = remember(filteredMuezzins, selectedRegion) {
+                    val groupedByRegion = remember(pagedMuezzins, selectedRegion) {
                         if (selectedRegion == MuezzinRegion.ALL) {
                             val regionOrder = listOf(
                                 MuezzinRegion.CUSTOM,
@@ -490,7 +590,7 @@ fun MuezzinLibraryModal(
                                 MuezzinRegion.FAJR
                             )
                             regionOrder.mapNotNull { reg ->
-                                val list = filteredMuezzins.filter { it.regionEnum() == reg }
+                                val list = pagedMuezzins.filter { it.regionEnum() == reg }
                                 if (list.isNotEmpty()) reg to list else null
                             }
                         } else {
@@ -499,6 +599,7 @@ fun MuezzinLibraryModal(
                     }
 
                     LazyColumn(
+                        state = listState,
                         modifier = Modifier.weight(1f),
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                         contentPadding = PaddingValues(bottom = 20.dp)
@@ -549,28 +650,34 @@ fun MuezzinLibraryModal(
                                         isDefault = muezzin.id == defaultMuezzinId,
                                         isFajrDefault = muezzin.id == fajrMuezzinId,
                                         isFavorite = favoriteIds.contains(muezzin.id),
+                                        isCachedOffline = cachedAdhanIds.contains(muezzin.id),
+                                        isDownloadingOffline = downloadingMuezzinIds.contains(muezzin.id),
                                         adhanState = adhanState,
                                         onTogglePreview = { onTogglePreview(muezzin) },
                                         onToggleFavorite = { onToggleFavorite(muezzin.id) },
                                         onSetDefault = { onSetDefaultMuezzin(muezzin) },
                                         onSetFajr = { onSetFajrMuezzin(muezzin) },
+                                        onDownloadOffline = { onDownloadOffline(muezzin) },
                                         onEditAudio = { editingAudioMuezzin = muezzin },
                                         onDelete = if (muezzin.isCustom) ({ onDeleteCustomMuezzin(muezzin) }) else null
                                     )
                                 }
                             }
                         } else {
-                            items(filteredMuezzins, key = { it.id }) { muezzin ->
+                            items(pagedMuezzins, key = { it.id }) { muezzin ->
                                 MuezzinCard(
                                     muezzin = muezzin,
                                     isDefault = muezzin.id == defaultMuezzinId,
                                     isFajrDefault = muezzin.id == fajrMuezzinId,
                                     isFavorite = favoriteIds.contains(muezzin.id),
+                                    isCachedOffline = cachedAdhanIds.contains(muezzin.id),
+                                    isDownloadingOffline = downloadingMuezzinIds.contains(muezzin.id),
                                     adhanState = adhanState,
                                     onTogglePreview = { onTogglePreview(muezzin) },
                                     onToggleFavorite = { onToggleFavorite(muezzin.id) },
                                     onSetDefault = { onSetDefaultMuezzin(muezzin) },
                                     onSetFajr = { onSetFajrMuezzin(muezzin) },
+                                    onDownloadOffline = { onDownloadOffline(muezzin) },
                                     onEditAudio = { editingAudioMuezzin = muezzin },
                                     onDelete = if (muezzin.isCustom) ({ onDeleteCustomMuezzin(muezzin) }) else null
                                 )
@@ -745,16 +852,19 @@ private fun MuezzinCard(
     isDefault: Boolean,
     isFajrDefault: Boolean,
     isFavorite: Boolean,
+    isCachedOffline: Boolean,
+    isDownloadingOffline: Boolean,
     adhanState: AdhanPlayerState,
     onTogglePreview: () -> Unit,
     onToggleFavorite: () -> Unit,
     onSetDefault: () -> Unit,
     onSetFajr: () -> Unit,
+    onDownloadOffline: () -> Unit,
     onEditAudio: () -> Unit,
     onDelete: (() -> Unit)?
 ) {
     val islamic = LocalIslamicColors.current
-    val hasAudio = muezzin.hasAudioSource()
+    val hasAudio = muezzin.hasAudioSource() || isCachedOffline
     val isThisActive = adhanState.activeMuezzinId == muezzin.id
     val isLoading = isThisActive && adhanState.status == AdhanPlaybackStatus.LOADING
     val isPlaying = isThisActive && (
@@ -771,6 +881,7 @@ private fun MuezzinCard(
         colors = CardDefaults.cardColors(
             containerColor = if (isDefault) islamic.emeraldSoft else MaterialTheme.colorScheme.surface
         ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         border = BorderStroke(
             width = if (isDefault || isPlaying) 1.5.dp else 1.dp,
             color = when {
@@ -901,17 +1012,33 @@ private fun MuezzinCard(
                             hasAudio -> {
                                 Surface(
                                     shape = RoundedCornerShape(50),
-                                    color = islamic.cardAlt,
-                                    border = BorderStroke(1.dp, islamic.border),
+                                    color = if (isCachedOffline) Color(0xFFDCFCE7) else islamic.cardAlt,
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (isCachedOffline) Color(0xFF15803D).copy(alpha = 0.5f) else islamic.border
+                                    ),
                                     modifier = Modifier.testTag("muezzin_audio_badge_${muezzin.id}")
                                 ) {
-                                    Text(
-                                        text = "صوت افتراضي",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontWeight = FontWeight.Bold,
-                                        color = islamic.textMuted,
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
                                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-                                    )
+                                    ) {
+                                        if (isCachedOffline) {
+                                            Icon(
+                                                imageVector = Icons.Default.CloudDone,
+                                                contentDescription = null,
+                                                tint = Color(0xFF15803D),
+                                                modifier = Modifier.size(12.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                        }
+                                        Text(
+                                            text = if (isCachedOffline) "محفوظ بدون إنترنت ✓" else "صوت افتراضي",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (isCachedOffline) Color(0xFF15803D) else islamic.textMuted
+                                        )
+                                    }
                                 }
                             }
                             else -> {
@@ -1046,36 +1173,109 @@ private fun MuezzinCard(
 
             Spacer(modifier = Modifier.height(6.dp))
 
-            // Action Row 2: Per-Muezzin Upload / Edit Audio (Replace URL or Upload Local MP3)
-            OutlinedButton(
-                onClick = onEditAudio,
-                shape = RoundedCornerShape(10.dp),
-                border = BorderStroke(
-                    1.dp,
-                    if (hasAudio) islamic.border else islamic.gold.copy(alpha = 0.85f)
-                ),
-                colors = ButtonDefaults.outlinedButtonColors(
-                    containerColor = if (hasAudio) islamic.cardAlt else islamic.goldSoft,
-                    contentColor = if (hasAudio) MaterialTheme.colorScheme.primary else islamic.goldText
-                ),
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("muezzin_edit_audio_${muezzin.id}")
+            // Action Row 2: Offline MP3 Download (when remote URL exists) + Edit/Upload Audio
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Icon(
-                    imageVector = if (hasAudio) Icons.Default.Edit else Icons.Default.UploadFile,
-                    contentDescription = if (hasAudio) "تعديل الرابط أو رفع صوت" else "أضف ملف الصوت",
-                    tint = if (hasAudio) MaterialTheme.colorScheme.primary else islamic.goldText,
-                    modifier = Modifier.size(15.dp)
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(
-                    text = if (hasAudio) "تعديل الرابط / رفع صوت" else "أضف ملف الصوت (MP3 / رابط)",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = if (hasAudio) MaterialTheme.colorScheme.primary else islamic.goldText
-                )
+                if (muezzin.primaryUrl.isNotBlank() && muezzin.localFilePath.isNullOrBlank()) {
+                    OutlinedButton(
+                        onClick = onDownloadOffline,
+                        enabled = !isDownloadingOffline,
+                        shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(
+                            1.dp,
+                            if (isCachedOffline) Color(0xFF15803D).copy(alpha = 0.55f) else MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
+                        ),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = if (isCachedOffline) Color(0xFFDCFCE7) else islamic.emeraldSoft,
+                            contentColor = if (isCachedOffline) Color(0xFF15803D) else MaterialTheme.colorScheme.primary
+                        ),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("muezzin_download_offline_${muezzin.id}")
+                    ) {
+                        when {
+                            isDownloadingOffline -> {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(14.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "جاري التحميل...",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            isCachedOffline -> {
+                                Icon(
+                                    imageVector = Icons.Default.CloudDone,
+                                    contentDescription = "محفوظ بدون إنترنت",
+                                    tint = Color(0xFF15803D),
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Spacer(modifier = Modifier.width(5.dp))
+                                Text(
+                                    text = "محفوظ محلياً ✓",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF15803D)
+                                )
+                            }
+                            else -> {
+                                Icon(
+                                    imageVector = Icons.Default.Download,
+                                    contentDescription = "تحميل للتشغيل بدون إنترنت",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Spacer(modifier = Modifier.width(5.dp))
+                                Text(
+                                    text = "تحميل بدون إنترنت",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+                    }
+                }
+
+                OutlinedButton(
+                    onClick = onEditAudio,
+                    shape = RoundedCornerShape(10.dp),
+                    border = BorderStroke(
+                        1.dp,
+                        if (hasAudio) islamic.border else islamic.gold.copy(alpha = 0.85f)
+                    ),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        containerColor = if (hasAudio) islamic.cardAlt else islamic.goldSoft,
+                        contentColor = if (hasAudio) MaterialTheme.colorScheme.primary else islamic.goldText
+                    ),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("muezzin_edit_audio_${muezzin.id}")
+                ) {
+                    Icon(
+                        imageVector = if (hasAudio) Icons.Default.Edit else Icons.Default.UploadFile,
+                        contentDescription = if (hasAudio) "تعديل الرابط أو رفع صوت" else "أضف ملف الصوت",
+                        tint = if (hasAudio) MaterialTheme.colorScheme.primary else islamic.goldText,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Spacer(modifier = Modifier.width(5.dp))
+                    Text(
+                        text = if (hasAudio) "تعديل / رفع صوت" else "أضف ملف الصوت (MP3 / رابط)",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = if (hasAudio) MaterialTheme.colorScheme.primary else islamic.goldText,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
         }
     }

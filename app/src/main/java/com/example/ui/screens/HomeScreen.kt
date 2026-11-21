@@ -35,6 +35,7 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
@@ -59,6 +60,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -719,7 +721,7 @@ private fun ContinueReadingBanner(
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
-                        text = "${bookmark.surahName} — الآية ${bookmark.ayahNumber}",
+                        text = "${bookmark.surahName} • صفحة ${toArabicIndicDigits(bookmark.pageNumber)} (الآية ${toArabicIndicDigits(bookmark.ayahNumber)})",
                         style = MaterialTheme.typography.bodySmall,
                         color = islamic.textMuted
                     )
@@ -815,39 +817,65 @@ private fun DailyWorshipTrackerCard(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     rowItems.forEach { task ->
+                        val isLocked = task.isLockedFuture
                         val bgColor by animateColorAsState(
-                            targetValue = if (task.completed) islamic.emeraldSoft else islamic.cardAlt,
+                            targetValue = when {
+                                isLocked -> islamic.cardAlt
+                                task.completed -> islamic.emeraldSoft
+                                else -> islamic.cardAlt
+                            },
                             label = "task_bg"
                         )
                         val borderColor by animateColorAsState(
-                            targetValue = if (task.completed) MaterialTheme.colorScheme.primary.copy(alpha = 0.4f) else islamic.border,
+                            targetValue = when {
+                                isLocked -> islamic.border
+                                task.completed -> MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)
+                                else -> islamic.border
+                            },
                             label = "task_border"
                         )
                         Row(
                             modifier = Modifier
                                 .weight(1f)
+                                .alpha(if (isLocked) 0.58f else 1f)
                                 .clip(RoundedCornerShape(12.dp))
                                 .background(bgColor)
                                 .border(1.dp, borderColor, RoundedCornerShape(12.dp))
                                 .testTag("worship_task_${task.id}")
-                                .clickable { onToggleTask(task.id) }
-                                .padding(horizontal = 10.dp, vertical = 12.dp),
+                                .clickable(enabled = !isLocked) { onToggleTask(task.id) }
+                                .padding(horizontal = 10.dp, vertical = 11.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Box(
                                 modifier = Modifier
                                     .size(22.dp)
                                     .clip(CircleShape)
-                                    .background(if (task.completed) MaterialTheme.colorScheme.primary else Color.Transparent)
+                                    .background(
+                                        when {
+                                            isLocked -> islamic.border.copy(alpha = 0.45f)
+                                            task.completed -> MaterialTheme.colorScheme.primary
+                                            else -> Color.Transparent
+                                        }
+                                    )
                                     .border(
-                                        2.dp,
-                                        if (task.completed) MaterialTheme.colorScheme.primary else islamic.textMuted.copy(alpha = 0.6f),
-                                        CircleShape
+                                        width = if (isLocked) 1.5.dp else 2.dp,
+                                        color = when {
+                                            isLocked -> islamic.textMuted.copy(alpha = 0.5f)
+                                            task.completed -> MaterialTheme.colorScheme.primary
+                                            else -> islamic.textMuted.copy(alpha = 0.6f)
+                                        },
+                                        shape = CircleShape
                                     ),
                                 contentAlignment = Alignment.Center
                             ) {
-                                if (task.completed) {
-                                    Icon(
+                                when {
+                                    isLocked -> Icon(
+                                        imageVector = Icons.Default.Lock,
+                                        contentDescription = "لم يحن وقتها بعد",
+                                        tint = islamic.textMuted,
+                                        modifier = Modifier.size(12.dp)
+                                    )
+                                    task.completed -> Icon(
                                         imageVector = Icons.Default.Check,
                                         contentDescription = "مكتمل",
                                         tint = Color.White,
@@ -856,15 +884,31 @@ private fun DailyWorshipTrackerCard(
                                 }
                             }
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = task.label,
-                                style = MaterialTheme.typography.bodySmall,
-                                fontWeight = FontWeight.SemiBold,
-                                color = if (task.completed) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
-                                textDecoration = if (task.completed) TextDecoration.LineThrough else TextDecoration.None,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = task.label,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = when {
+                                        isLocked -> islamic.textMuted
+                                        task.completed -> MaterialTheme.colorScheme.primary
+                                        else -> MaterialTheme.colorScheme.onSurface
+                                    },
+                                    textDecoration = if (!isLocked && task.completed) TextDecoration.LineThrough else TextDecoration.None,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                if (isLocked) {
+                                    Text(
+                                        text = "لم يحن وقتها بعد",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontSize = 10.sp,
+                                        color = islamic.textMuted,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
                         }
                     }
                     if (rowItems.size == 1) {

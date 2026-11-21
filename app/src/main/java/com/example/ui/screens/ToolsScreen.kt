@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.Location
 import android.net.Uri
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -37,12 +38,15 @@ import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MyLocation
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -69,16 +73,22 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.example.BuildConfig
+import com.example.PermissionsOnboardingActivity
+import com.example.alarm.PermissionsHelper
 import com.example.data.local.OfflineIslamicData
 import com.example.data.model.CalculatedWakeupTime
 import com.example.data.model.FajrAlarmSettings
 import com.example.data.model.GuideSection
 import com.example.data.model.MuezzinItem
 import com.example.sensor.QiblaCompassSensor
+import com.example.ui.components.performKeyTapHaptic
 import com.example.ui.theme.LocalIslamicColors
 import com.example.ui.theme.SoftGold
 import com.example.ui.viewmodel.ToolsUiState
@@ -94,6 +104,10 @@ fun ToolsScreen(
     fajrAlarmSettings: FajrAlarmSettings,
     fajrWakeupTime: CalculatedWakeupTime,
     darkMode: Boolean,
+    countdownNotificationEnabled: Boolean,
+    adhanSilenceOnVolume: Boolean,
+    adhanSilenceOnFlip: Boolean,
+    isCheckingAppUpdate: Boolean,
     onOpenMuezzinLibrary: () -> Unit,
     onOpenFajrAlarm: () -> Unit,
     onGpsLocation: (Location) -> Unit,
@@ -101,10 +115,16 @@ fun ToolsScreen(
     onToggleCompassSensor: (Boolean) -> Unit,
     onToggleGuide: (String) -> Unit,
     onToggleDarkMode: () -> Unit,
+    onToggleCountdownNotification: (Boolean) -> Unit,
+    onToggleAdhanSilenceOnVolume: (Boolean) -> Unit,
+    onToggleAdhanSilenceOnFlip: (Boolean) -> Unit,
+    onCheckForAppUpdate: () -> Unit,
+    onOpenAboutCopyright: () -> Unit,
     onResetTracker: () -> Unit,
     onShowToast: (String) -> Unit
 ) {
     val context = LocalContext.current
+    val view = LocalView.current
     val islamic = LocalIslamicColors.current
 
     // Live hardware compass sensor lifecycle
@@ -160,6 +180,16 @@ fun ToolsScreen(
             requestCurrentGps()
         } else {
             onShowToast("يرجى السماح بصلاحية الموقع لحساب القبلة من موقعك الحالي")
+        }
+    }
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            onToggleCountdownNotification(true)
+        } else {
+            onShowToast("يرجى السماح بإذن الإشعارات لعرض عدّاد الصلاة القادمة")
         }
     }
 
@@ -478,13 +508,261 @@ fun ToolsScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "إشعار الوقت المتبقي للصلاة القادمة",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = "إشعار صامت ومستمر في شريط الحالة يتحدّث كل دقيقة",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = islamic.textMuted
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Switch(
+                            checked = countdownNotificationEnabled,
+                            onCheckedChange = { wantEnabled ->
+                                if (wantEnabled &&
+                                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                                    !PermissionsHelper.isNotificationGranted(context)
+                                ) {
+                                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                } else {
+                                    onToggleCountdownNotification(wantEnabled)
+                                }
+                            },
+                            modifier = Modifier.testTag("settings_countdown_notification_switch")
+                        )
+                    }
+
+                    HorizontalDivider(
+                        modifier = Modifier.padding(vertical = 10.dp),
+                        color = islamic.border
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "إيقاف الأذان بأزرار الصوت",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = "اضغط زر رفع أو خفض الصوت لكتم الأذان فوراً حتى والشاشة مغلقة",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = islamic.textMuted
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Switch(
+                            checked = adhanSilenceOnVolume,
+                            onCheckedChange = { enabled ->
+                                performKeyTapHaptic(view)
+                                onToggleAdhanSilenceOnVolume(enabled)
+                            },
+                            modifier = Modifier.testTag("settings_adhan_silence_volume_switch")
+                        )
+                    }
+
+                    HorizontalDivider(
+                        modifier = Modifier.padding(vertical = 10.dp),
+                        color = islamic.border
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "إيقاف الأذان بقلب الهاتف",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = "اقلب الهاتف على وجهه لإيقاف الأذان تلقائياً (يعمل المستشعر أثناء الأذان فقط)",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = islamic.textMuted
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Switch(
+                            checked = adhanSilenceOnFlip,
+                            onCheckedChange = { enabled ->
+                                performKeyTapHaptic(view)
+                                onToggleAdhanSilenceOnFlip(enabled)
+                            },
+                            modifier = Modifier.testTag("settings_adhan_silence_flip_switch")
+                        )
+                    }
+
+                    HorizontalDivider(
+                        modifier = Modifier.padding(vertical = 10.dp),
+                        color = islamic.border
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "أذونات الأذان والتنبيهات",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = "الإشعارات، المنبهات الدقيقة، البطارية، والموقع",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = islamic.textMuted
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        OutlinedButton(
+                            onClick = {
+                                val intent = Intent(context, PermissionsOnboardingActivity::class.java).apply {
+                                    putExtra(PermissionsOnboardingActivity.EXTRA_FROM_SETTINGS, true)
+                                }
+                                context.startActivity(intent)
+                            },
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.testTag("open_permissions_setup_button")
+                        ) {
+                            Text("إدارة")
+                        }
+                    }
+
+                    HorizontalDivider(
+                        modifier = Modifier.padding(vertical = 10.dp),
+                        color = islamic.border
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "تحديث التطبيق",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = "الإصدار الحالي: ${BuildConfig.VERSION_NAME}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = islamic.textMuted
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(
+                            onClick = onCheckForAppUpdate,
+                            enabled = !isCheckingAppUpdate,
+                            shape = RoundedCornerShape(12.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = islamic.emeraldSoft,
+                                contentColor = MaterialTheme.colorScheme.primary
+                            ),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                            modifier = Modifier.testTag("check_app_update_button")
+                        ) {
+                            if (isCheckingAppUpdate) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "جاري الفحص...",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Default.SystemUpdate,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "التحقق من التحديثات",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(
+                        modifier = Modifier.padding(vertical = 10.dp),
+                        color = islamic.border
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "عن التطبيق وحقوق الملكية",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = "معلومات الإصدار وحقوق الطبع والموقع الرسمي",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = islamic.textMuted
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        OutlinedButton(
+                            onClick = {
+                                performKeyTapHaptic(view)
+                                onOpenAboutCopyright()
+                            },
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.testTag("open_about_copyright_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Info,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("عرض")
+                        }
+                    }
+
+                    HorizontalDivider(
+                        modifier = Modifier.padding(vertical = 10.dp),
+                        color = islamic.border
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         Text(
                             text = "تصفير ورد اليوم",
                             style = MaterialTheme.typography.bodyMedium,
                             fontWeight = FontWeight.SemiBold
                         )
                         OutlinedButton(
-                            onClick = onResetTracker,
+                            onClick = {
+                                performKeyTapHaptic(view)
+                                onResetTracker()
+                            },
                             shape = RoundedCornerShape(12.dp),
                             modifier = Modifier.testTag("reset_today_tracker_button")
                         ) {
@@ -595,6 +873,20 @@ fun ToolsScreen(
                     }
                 }
             }
+        }
+
+        // 5. Subtle Copyright Footer
+        item(key = "copyright_footer") {
+            Text(
+                text = "© 2026 رفيق المسلم — جميع الحقوق محفوظة",
+                style = MaterialTheme.typography.labelSmall,
+                color = islamic.textMuted,
+                textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp, bottom = 12.dp)
+                    .testTag("settings_copyright_footer")
+            )
         }
     }
 }

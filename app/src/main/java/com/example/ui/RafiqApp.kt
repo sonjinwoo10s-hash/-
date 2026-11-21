@@ -61,6 +61,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.local.OfflineIslamicData
+import com.example.ui.components.AboutCopyrightModal
+import com.example.ui.components.AppUpdateOverlayHost
 import com.example.ui.components.StickyQuranMiniPlayer
 import com.example.ui.screens.AzkarScreen
 import com.example.ui.screens.FajrAlarmRingingScreen
@@ -92,8 +94,10 @@ fun RafiqApp(viewModel: RafiqViewModel) {
     val quranState by viewModel.quranState.collectAsStateWithLifecycle()
     val quranFontSize by viewModel.quranFontSize.collectAsStateWithLifecycle()
     val mushafPaperTheme by viewModel.mushafPaperTheme.collectAsStateWithLifecycle()
+    val tajweedColorsEnabled by viewModel.tajweedColorsEnabled.collectAsStateWithLifecycle()
     val audioState by viewModel.audioState.collectAsStateWithLifecycle()
     val ayahAudioState by viewModel.ayahAudioState.collectAsStateWithLifecycle()
+    val tafsirState by viewModel.tafsirState.collectAsStateWithLifecycle()
     val azkarState by viewModel.azkarState.collectAsStateWithLifecycle()
     val tasbihState by viewModel.tasbihState.collectAsStateWithLifecycle()
     val hadithState by viewModel.hadithState.collectAsStateWithLifecycle()
@@ -116,6 +120,16 @@ fun RafiqApp(viewModel: RafiqViewModel) {
     val fajrWakeupTime by viewModel.fajrWakeupTime.collectAsStateWithLifecycle()
     val fajrAlarmSettingsOpen by viewModel.fajrAlarmSettingsOpen.collectAsStateWithLifecycle()
     val fajrAlarmRinging by viewModel.fajrAlarmRinging.collectAsStateWithLifecycle()
+    val countdownNotificationEnabled by viewModel.countdownNotificationEnabled.collectAsStateWithLifecycle()
+    val adhanSilenceOnVolume by viewModel.adhanSilenceOnVolume.collectAsStateWithLifecycle()
+    val adhanSilenceOnFlip by viewModel.adhanSilenceOnFlip.collectAsStateWithLifecycle()
+    val isSyncingMuezzinRepo by viewModel.isSyncingMuezzinRepo.collectAsStateWithLifecycle()
+    val muezzinRepoStatus by viewModel.muezzinRepoStatus.collectAsStateWithLifecycle()
+    val cachedAdhanIds by viewModel.cachedAdhanIds.collectAsStateWithLifecycle()
+    val downloadingMuezzinIds by viewModel.downloadingMuezzinIds.collectAsStateWithLifecycle()
+    val appUpdateState by viewModel.appUpdateState.collectAsStateWithLifecycle()
+    val aboutCopyrightOpen by viewModel.aboutCopyrightOpen.collectAsStateWithLifecycle()
+    val lastHadithResume by viewModel.lastHadithResume.collectAsStateWithLifecycle()
 
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -126,17 +140,17 @@ fun RafiqApp(viewModel: RafiqViewModel) {
         }
     }
 
-    val isFullScreenQuran = selectedTab == RafiqTab.QURAN &&
-        quranState.activeSurah != null &&
-        quranState.isFullScreenReading
+    val isFullScreenQuran = selectedTab == RafiqTab.QURAN && quranState.isMushafOpen
 
     // Back press from secondary tabs returns to Home
     if (selectedTab != RafiqTab.HOME &&
-        quranState.activeSurah == null &&
+        !quranState.isMushafOpen &&
+        hadithState.openBook == null &&
         !muezzinLibraryOpen &&
         !reciterLibraryOpen &&
         !fajrAlarmSettingsOpen &&
-        !fajrAlarmRinging
+        !fajrAlarmRinging &&
+        !aboutCopyrightOpen
     ) {
         BackHandler { viewModel.selectTab(RafiqTab.HOME) }
     }
@@ -179,6 +193,7 @@ fun RafiqApp(viewModel: RafiqViewModel) {
                                         onPreviousSurah = viewModel::playPreviousSurah,
                                         onNextSurah = viewModel::playNextSurah,
                                         onSeek = viewModel::seekAudio,
+                                        onSelectPlaybackSpeed = viewModel::setQuranPlaybackSpeed,
                                         onDownloadMp3 = viewModel::downloadCurrentSurahMp3,
                                         onOpenReciterLibrary = viewModel::openReciterLibrary,
                                         onDismiss = viewModel::dismissMiniPlayer
@@ -230,6 +245,7 @@ fun RafiqApp(viewModel: RafiqViewModel) {
                                     onPreviousSurah = viewModel::playPreviousSurah,
                                     onNextSurah = viewModel::playNextSurah,
                                     onSeek = viewModel::seekAudio,
+                                    onSelectPlaybackSpeed = viewModel::setQuranPlaybackSpeed,
                                     onDownloadMp3 = viewModel::downloadCurrentSurahMp3,
                                     onOpenReciterLibrary = viewModel::openReciterLibrary,
                                     onDismiss = viewModel::dismissMiniPlayer,
@@ -314,12 +330,23 @@ fun RafiqApp(viewModel: RafiqViewModel) {
                                     state = quranState,
                                     fontSizeSp = quranFontSize,
                                     paperTheme = mushafPaperTheme,
+                                    tajweedColorsEnabled = tajweedColorsEnabled,
                                     bookmark = bookmark,
                                     audioState = audioState,
                                     ayahAudioState = ayahAudioState,
+                                    tafsirState = tafsirState,
                                     onSearchChange = viewModel::updateSurahSearch,
                                     onFilterChange = viewModel::updateRevelationFilter,
                                     onOpenSurah = { viewModel.openSurahReader(it) },
+                                    onOpenMushafLastPage = viewModel::openMushafAtLastPage,
+                                    onOpenMushafPage = viewModel::openMushafAtPage,
+                                    onMushafPageChanged = viewModel::onMushafPageChanged,
+                                    onRetryOfflineMushaf = { viewModel.ensureOfflineMushafLoaded(forceRetry = true) },
+                                    onToggleMushafNightMode = viewModel::toggleMushafNightMode,
+                                    onToggleTajweedColors = viewModel::toggleTajweedColors,
+                                    onSaveMushafPageBookmark = viewModel::saveMushafPageBookmark,
+                                    onPlaySingleAyahOnly = viewModel::playSinglePageAyahOnly,
+                                    onPlayFromPageAyah = viewModel::playContinueFromPageAyah,
                                     onPlaySurahFromList = viewModel::playSurahFromList,
                                     onOpenReciterLibrary = viewModel::openReciterLibrary,
                                     onRetryReader = {
@@ -336,11 +363,19 @@ fun RafiqApp(viewModel: RafiqViewModel) {
                                     onToggleAudio = viewModel::toggleSurahAudio,
                                     onSelectReciter = viewModel::selectReciter,
                                     onSeekAudio = viewModel::seekAudio,
+                                    onSelectPlaybackSpeed = viewModel::setQuranPlaybackSpeed,
+                                    onToggleWordByWord = viewModel::setWordByWordHighlightEnabled,
+                                    onSyncLatencyOffsetChange = viewModel::setSyncLatencyOffsetMs,
+                                    onTapSeekWordOrAyah = viewModel::seekToWordOrAyahWhilePlaying,
                                     onDownloadMp3 = viewModel::downloadCurrentSurahMp3,
                                     onTogglePlaySingleAyah = viewModel::togglePlaySingleAyah,
                                     onStopSingleAyah = viewModel::stopSingleAyahAudio,
                                     onSelectAyahRepeatMode = viewModel::setAyahRepeatMode,
                                     onToggleAyahContinueReading = viewModel::setAyahContinueReading,
+                                    onOpenAyahTafsir = { sNum, aNum -> viewModel.loadAyahTafsir(sNum, aNum) },
+                                    onSelectTafsirBook = viewModel::selectTafsirBook,
+                                    onRetryTafsir = viewModel::retryCurrentAyahTafsir,
+                                    onDownloadTafsirBook = viewModel::downloadTafsirBookOffline,
                                     onShowToast = viewModel::emitToast
                                 )
 
@@ -360,17 +395,23 @@ fun RafiqApp(viewModel: RafiqViewModel) {
 
                                 RafiqTab.HADITH -> HadithScreen(
                                     state = hadithState,
+                                    darkMode = darkMode,
                                     favoriteUids = favoriteHadithUids,
                                     hadithFontSizeSp = hadithFontSize,
-                                    onSelectBook = viewModel::selectHadithBook,
+                                    lastHadithResume = lastHadithResume,
+                                    onSelectSubTab = viewModel::selectHadithSubTab,
+                                    onOpenBook = viewModel::openHadithBook,
+                                    onCloseBook = viewModel::closeHadithBook,
+                                    onSaveHadithScrollIndex = viewModel::saveHadithScrollIndex,
+                                    onDownloadBook = { viewModel.downloadHadithBookOffline(it) },
+                                    onDeleteBook = viewModel::deleteHadithBookOffline,
                                     onSearchChange = viewModel::updateHadithSearch,
-                                    onToggleSearchAllBooks = viewModel::toggleHadithSearchAllBooks,
-                                    onSelectChapter = viewModel::selectHadithChapter,
+                                    onFavoritesSearchChange = viewModel::updateHadithFavoritesSearch,
+                                    onToggleFontFamily = viewModel::toggleHadithFontFamily,
                                     onToggleExplanation = viewModel::toggleHadithExplanation,
                                     onToggleFavorite = viewModel::toggleFavoriteHadith,
                                     onFontSizeChange = viewModel::updateHadithFontSize,
                                     onLoadMore = viewModel::loadMoreHadiths,
-                                    onRetryCollection = { viewModel.fetchHadithCollection(hadithState.selectedBook) },
                                     onShowToast = viewModel::emitToast
                                 )
 
@@ -380,6 +421,10 @@ fun RafiqApp(viewModel: RafiqViewModel) {
                                     fajrAlarmSettings = fajrAlarmSettings,
                                     fajrWakeupTime = fajrWakeupTime,
                                     darkMode = darkMode,
+                                    countdownNotificationEnabled = countdownNotificationEnabled,
+                                    adhanSilenceOnVolume = adhanSilenceOnVolume,
+                                    adhanSilenceOnFlip = adhanSilenceOnFlip,
+                                    isCheckingAppUpdate = appUpdateState.isChecking,
                                     onOpenMuezzinLibrary = viewModel::openMuezzinLibrary,
                                     onOpenFajrAlarm = viewModel::openFajrAlarmSettings,
                                     onGpsLocation = viewModel::onGpsLocationDetected,
@@ -387,6 +432,11 @@ fun RafiqApp(viewModel: RafiqViewModel) {
                                     onToggleCompassSensor = viewModel::setCompassSensorEnabled,
                                     onToggleGuide = viewModel::toggleGuideAccordion,
                                     onToggleDarkMode = viewModel::toggleDarkMode,
+                                    onToggleCountdownNotification = viewModel::setCountdownNotificationEnabled,
+                                    onToggleAdhanSilenceOnVolume = viewModel::setAdhanSilenceOnVolume,
+                                    onToggleAdhanSilenceOnFlip = viewModel::setAdhanSilenceOnFlip,
+                                    onCheckForAppUpdate = { viewModel.checkForAppUpdate(manual = true) },
+                                    onOpenAboutCopyright = viewModel::openAboutCopyright,
                                     onResetTracker = viewModel::resetTodayTracker,
                                     onShowToast = viewModel::emitToast
                                 )
@@ -404,7 +454,13 @@ fun RafiqApp(viewModel: RafiqViewModel) {
                     useDedicatedFajrAdhan = useDedicatedFajrAdhan,
                     favoriteIds = favoriteMuezzinIds,
                     adhanState = adhanState,
+                    isSyncingRepo = isSyncingMuezzinRepo,
+                    repoStatusMessage = muezzinRepoStatus,
+                    cachedAdhanIds = cachedAdhanIds,
+                    downloadingMuezzinIds = downloadingMuezzinIds,
                     onClose = viewModel::closeMuezzinLibrary,
+                    onSyncRepo = { viewModel.syncMuezzinRepo(isAutoFirstLaunch = false) },
+                    onDownloadOffline = viewModel::downloadMuezzinForOffline,
                     onTogglePreview = viewModel::toggleAdhanPreview,
                     onSwitchFallbackStream = viewModel::switchAdhanFallbackStream,
                     onRetryAdhan = viewModel::retryAdhanPreview,
@@ -445,6 +501,13 @@ fun RafiqApp(viewModel: RafiqViewModel) {
                 )
             }
 
+            if (aboutCopyrightOpen) {
+                AboutCopyrightModal(
+                    onClose = viewModel::closeAboutCopyright,
+                    onShowToast = viewModel::emitToast
+                )
+            }
+
             // TOPMOST Z-LAYER: Full-Screen Inescapable Smart Fajr Alarm Ringing Overlay
             if (fajrAlarmRinging) {
                 FajrAlarmRingingScreen(
@@ -452,6 +515,17 @@ fun RafiqApp(viewModel: RafiqViewModel) {
                     onChallengeSolved = viewModel::dismissFajrAlarmAfterChallenge
                 )
             }
+
+            // In-App Direct Auto-Update Dialogs (Update Available, Live Progress, Install Permission)
+            AppUpdateOverlayHost(
+                state = appUpdateState,
+                onStartDownload = viewModel::startAppUpdateDownload,
+                onCancelDownload = viewModel::cancelAppUpdateDownload,
+                onDismiss = viewModel::dismissAppUpdateDialog,
+                onInstallReadyApk = viewModel::installDownloadedApk,
+                onPermissionRequired = viewModel::markInstallPermissionRequired,
+                onShowToast = viewModel::emitToast
+            )
         }
     }
 }
