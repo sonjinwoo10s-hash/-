@@ -149,9 +149,11 @@ object OfflineQuranRepository {
             // 1. Always prefer internal storage cache (100% offline, zero network)
             if (localFile.exists() && localFile.length() > 100_000L) {
                 onStatus("جاري فتح المصحف الشريف أوفلاين...")
-                val jsonText = localFile.readText(Charsets.UTF_8)
-                val parsed = parseCompleteQuranJson(jsonText, loadedFromLocalCache = true)
-                if (parsed.pages.size >= 600) {
+                val parsed = runCatching {
+                    val jsonText = localFile.readText(Charsets.UTF_8)
+                    parseCompleteQuranJson(jsonText, loadedFromLocalCache = true)
+                }.getOrNull()
+                if (parsed != null && parsed.pages.size >= 600) {
                     return@withContext Result.success(parsed)
                 }
             }
@@ -159,14 +161,16 @@ object OfflineQuranRepository {
             // 2. Fallback to bundled assets/quran_offline.json if packaged with APK
             if (hasBundledAsset(context)) {
                 onStatus("جاري قراءة المصحف المدمج أوفلاين...")
-                val jsonText = context.assets.open(ASSET_FILE_NAME).bufferedReader(Charsets.UTF_8).use {
-                    it.readText()
-                }
-                val parsed = parseCompleteQuranJson(jsonText, loadedFromLocalCache = true)
-                if (parsed.pages.size >= 600) {
+                val assetResult = runCatching {
+                    val jsonText = context.assets.open(ASSET_FILE_NAME).bufferedReader(Charsets.UTF_8).use {
+                        it.readText()
+                    }
+                    jsonText to parseCompleteQuranJson(jsonText, loadedFromLocalCache = true)
+                }.getOrNull()
+                if (assetResult != null && assetResult.second.pages.size >= 600) {
                     // Copy to filesDir for fast direct file reads next time
-                    runCatching { localFile.writeText(jsonText, Charsets.UTF_8) }
-                    return@withContext Result.success(parsed)
+                    runCatching { localFile.writeText(assetResult.first, Charsets.UTF_8) }
+                    return@withContext Result.success(assetResult.second)
                 }
             }
 
@@ -247,7 +251,8 @@ object OfflineQuranRepository {
     ): OfflineMushafBook {
         val root = JSONObject(jsonString)
         val dataObj = root.optJSONObject("data") ?: root
-        val surahsArray = dataObj.getJSONArray("surahs")
+        val surahsArray = dataObj.optJSONArray("surahs")
+            ?: throw IOException("تنسيق ملف المصحف غير صالح")
 
         // Map of pageNumber (1..604) -> ordered list of (SurahMeta, Ayah)
         data class SurahMeta(
@@ -264,12 +269,12 @@ object OfflineQuranRepository {
         val juzStartPages = LinkedHashMap<Int, Int>(30)
 
         for (i in 0 until surahsArray.length()) {
-            val sObj = surahsArray.getJSONObject(i)
-            val sNum = sObj.getInt("number")
-            val sName = sObj.getString("name")
+            val sObj = surahsArray.optJSONObject(i) ?: continue
+            val sNum = sObj.optInt("number", i + 1)
+            val sName = sObj.optString("name", "").ifBlank { "سورة $sNum" }
             val sEnglish = sObj.optString("englishName", "")
             val sRevType = sObj.optString("revelationType", "Meccan")
-            val ayahsArray = sObj.getJSONArray("ayahs")
+            val ayahsArray = sObj.optJSONArray("ayahs") ?: continue
             val totalAyahs = ayahsArray.length()
 
             val meta = SurahMeta(
@@ -283,15 +288,15 @@ object OfflineQuranRepository {
             var firstPageOfSurah = 1
 
             for (j in 0 until totalAyahs) {
-                val aObj = ayahsArray.getJSONObject(j)
+                val aObj = ayahsArray.optJSONObject(j) ?: continue
                 val globalNum = aObj.optInt("number", 0)
-                val numInSurah = aObj.getInt("numberInSurah")
-                val pageNum = aObj.getInt("page").coerceIn(1, 604)
+                val numInSurah = aObj.optInt("numberInSurah", j + 1)
+                val pageNum = aObj.optInt("page", 1).coerceIn(1, 604)
                 val juzNum = aObj.optInt("juz", 1).coerceIn(1, 30)
                 val cleanedText = stripLeadingBasmalahIfNeeded(
                     surahNumber = sNum,
                     numberInSurah = numInSurah,
-                    rawText = aObj.getString("text")
+                    rawText = aObj.optString("text", "")
                 )
 
                 if (j == 0) {

@@ -162,11 +162,11 @@ class PermissionsOnboardingActivity : ComponentActivity() {
     }
 
     private fun refreshPermissions() {
-        val current = PermissionsHelper.checkAll(this)
+        val current = runCatching { PermissionsHelper.checkAll(this) }.getOrDefault(AppPermissionsStatus())
         permissionsState.value = current
         if (current.notificationsGranted) {
-            PrayerAlarmScheduler.scheduleAllPrayers(this)
-            PrayerCountdownService.syncState(this)
+            runCatching { PrayerAlarmScheduler.scheduleAllPrayers(this) }
+            runCatching { PrayerCountdownService.syncState(this) }
         }
     }
 
@@ -222,14 +222,14 @@ class PermissionsOnboardingActivity : ComponentActivity() {
     }
 
     private fun finishOnboardingAndProceed() {
-        OnboardingPrefs.setCompleted(this, true)
-        PrayerAlarmScheduler.scheduleAllPrayers(this)
-        PrayerCountdownService.syncState(this)
+        runCatching { OnboardingPrefs.setCompleted(this, true) }
+        runCatching { PrayerAlarmScheduler.scheduleAllPrayers(this) }
+        runCatching { PrayerCountdownService.syncState(this) }
         if (!openedFromSettings) {
             val mainIntent = Intent(this, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
             }
-            startActivity(mainIntent)
+            runCatching { startActivity(mainIntent) }
         }
         finish()
     }

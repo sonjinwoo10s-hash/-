@@ -17,18 +17,28 @@ data class PrayerEntry(
     val arabicName: String,
     val time24: String,
     val formatted12: String,
-    val isNext: Boolean = false
+    val isNext: Boolean = false,
+    val isPerformed: Boolean = false
 )
 
 data class PrayerTimesUiState(
     val isLoading: Boolean = false,
     val isOfflineFallback: Boolean = false,
+    val selectedDateKey: String = "",
+    val isSelectedDateToday: Boolean = true,
+    val isSelectedDateFuture: Boolean = false,
+    val isSelectedDatePast: Boolean = false,
     val hijriDate: String = "جاري تحميل التاريخ الهجري...",
     val gregorianDate: String = "",
+    val blessedDayBadge: String? = null,
+    val performedCount: Int = 0,
     val statusNote: String = "توقيت الهيئة المصرية العامة للمساحة",
     val prayers: List<PrayerEntry> = emptyList(),
     val nextPrayerName: String = "---",
-    val countdownText: String = "--:--:--"
+    val countdownText: String = "--:--:--",
+    val islamicMidnightFormatted: String = "--:--",
+    val lastThirdNightFormatted: String = "--:--",
+    val activeIqamaCountdown: ActiveIqamaCountdown? = null
 )
 
 data class WorshipTask(
@@ -45,11 +55,11 @@ data class DailyQuote(
 
 @JsonClass(generateAdapter = true)
 data class SurahSummary(
-    val number: Int,
-    val name: String,
+    val number: Int = 1,
+    val name: String = "",
     val englishName: String = "",
-    val numberOfAyahs: Int,
-    val revelationType: String,
+    val numberOfAyahs: Int = 0,
+    val revelationType: String = "Meccan",
     val startPage: Int = 1
 )
 
@@ -88,9 +98,9 @@ data class QuranBookmark(
 
 @JsonClass(generateAdapter = true)
 data class MoshafOption(
-    val id: Int,
-    val name: String,
-    val server: String,
+    val id: Int = 0,
+    val name: String = "",
+    val server: String = "",
     val surahTotal: Int = 114,
     val surahList: String = ""
 ) {
@@ -108,10 +118,10 @@ data class MoshafOption(
 
 @JsonClass(generateAdapter = true)
 data class ReciterOption(
-    val id: String,
-    val arabicName: String,
+    val id: String = "",
+    val arabicName: String = "",
     val riwayahName: String = "حفص عن عاصم - مرتل",
-    val serverUrl: String,
+    val serverUrl: String = "",
     val fallbackUrlTemplate: String? = null,
     val moshafList: List<MoshafOption> = emptyList(),
     val isFeatured: Boolean = false

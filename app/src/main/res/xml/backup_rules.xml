@@ -1,13 +1,17 @@
-<?xml version="1.0" encoding="utf-8"?><!--
-   Sample backup rules file; uncomment and customize as necessary.
-   See https://developer.android.com/guide/topics/data/autobackup
-   for details.
-   Note: This file is ignored for devices older than API 31
-   See https://developer.android.com/about/versions/12/backup-restore
--->
+<?xml version="1.0" encoding="utf-8"?>
 <full-backup-content>
-    <!--
-   <include domain="sharedpref" path="."/>
-   <exclude domain="sharedpref" path="device.xml"/>
--->
+    <!-- Back up prayer tracker logs, Qadaa history, schedules, and Muezzin/App settings -->
+    <include domain="sharedpref" path="rafiq_prayer_log_store.xml" />
+    <include domain="sharedpref" path="rafiq_prayer_schedule_store.xml" />
+    <include domain="sharedpref" path="rafiq_permissions_prefs.xml" />
+    <include domain="file" path="prayer_tracker_backup.json" />
+    <include domain="file" path="datastore/rafiq_al_muslim_prefs.preferences_pb" />
+
+    <!-- Exclude large offline media caches so Auto Backup stays fast and within Google Drive quota -->
+    <exclude domain="file" path="offline_quran" />
+    <exclude domain="file" path="offline_hadith" />
+    <exclude domain="file" path="offline_tafsir" />
+    <exclude domain="file" path="offline_adhan" />
+    <exclude domain="file" path="offline_alerts" />
+    <exclude domain="file" path="adhan" />
 </full-backup-content>

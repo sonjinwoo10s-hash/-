@@ -5,10 +5,12 @@ import android.content.Context
 import android.content.Intent
 import com.example.alarm.PrayerAlarmScheduler
 import com.example.service.PrayerCountdownService
+import com.example.widget.PrayerTimesWidgetProvider
 
 /**
- * Reschedules all 5 daily prayer alarms and restores the persistent countdown notification
- * automatically after device reboot, app update, or system time/timezone changes.
+ * Reschedules all 5 daily prayer alarms, restores the persistent countdown notification,
+ * and updates Home Screen Widgets automatically after device reboot, app update,
+ * or system time/date/timezone changes.
  */
 class BootCompletedReceiver : BroadcastReceiver() {
 
@@ -18,10 +20,12 @@ class BootCompletedReceiver : BroadcastReceiver() {
             action == Intent.ACTION_LOCKED_BOOT_COMPLETED ||
             action == Intent.ACTION_MY_PACKAGE_REPLACED ||
             action == Intent.ACTION_TIME_CHANGED ||
+            action == Intent.ACTION_DATE_CHANGED ||
             action == Intent.ACTION_TIMEZONE_CHANGED
         ) {
-            PrayerAlarmScheduler.scheduleAllPrayers(context)
-            PrayerCountdownService.syncState(context)
+            runCatching { PrayerAlarmScheduler.scheduleAllPrayers(context) }
+            runCatching { PrayerCountdownService.syncState(context) }
+            runCatching { PrayerTimesWidgetProvider.updateAllWidgets(context) }
         }
     }
 }

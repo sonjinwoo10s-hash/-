@@ -19,6 +19,7 @@ import com.example.MainActivity
 import com.example.R
 import com.example.alarm.PermissionsHelper
 import com.example.alarm.PrayerScheduleStore
+import com.example.widget.PrayerTimesWidgetProvider
 
 /**
  * Lightweight ForegroundService displaying a silent, ongoing status-bar notification
@@ -114,6 +115,7 @@ class PrayerCountdownService : Service() {
     private fun updateNotification() {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
         nm.notify(NOTIFICATION_ID, buildCountdownNotification())
+        PrayerTimesWidgetProvider.updateAllWidgets(applicationContext)
     }
 
     private fun buildCountdownNotification(): Notification {

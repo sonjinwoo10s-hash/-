@@ -2,6 +2,7 @@ package com.example.data.local
 
 import android.content.Context
 import androidx.datastore.core.DataStore
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
@@ -26,7 +27,12 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import androidx.datastore.preferences.core.emptyPreferences
 
-private val Context.rafiqDataStore: DataStore<Preferences> by preferencesDataStore(name = "rafiq_al_muslim_prefs")
+private val Context.rafiqDataStore: DataStore<Preferences> by preferencesDataStore(
+    name = "rafiq_al_muslim_prefs",
+    corruptionHandler = ReplaceFileCorruptionHandler(
+        produceNewData = { emptyPreferences() }
+    )
+)
 
 class AppPreferences(private val context: Context) {
 
@@ -113,169 +119,188 @@ class AppPreferences(private val context: Context) {
     )
     private val fajrAlarmAdapter = moshi.adapter(FajrAlarmSettings::class.java)
 
-    val darkModeFlow: Flow<Boolean> = context.rafiqDataStore.data.map { it[Keys.DARK_MODE] ?: false }
+    val darkModeFlow: Flow<Boolean> = safeDataFlow.map {
+        it.safeGetBoolean(Keys.DARK_MODE, false)
+    }.catch { emit(false) }
 
-    val selectedCityIdFlow: Flow<String> = context.rafiqDataStore.data.map {
-        it[Keys.SELECTED_CITY_ID] ?: OfflineIslamicData.cities.first().id
-    }
+    val selectedCityIdFlow: Flow<String> = safeDataFlow.map {
+        it.safeGetString(Keys.SELECTED_CITY_ID, OfflineIslamicData.cities.first().id)
+            ?: OfflineIslamicData.cities.first().id
+    }.catch { emit(OfflineIslamicData.cities.first().id) }
 
-    val quranFontSizeFlow: Flow<Float> = context.rafiqDataStore.data.map {
-        it[Keys.QURAN_FONT_SIZE] ?: 25f
-    }
+    val quranFontSizeFlow: Flow<Float> = safeDataFlow.map {
+        it.safeGetFloat(Keys.QURAN_FONT_SIZE, 25f).coerceIn(14f, 44f)
+    }.catch { emit(25f) }
 
-    val bookmarkFlow: Flow<QuranBookmark?> = context.rafiqDataStore.data.map { prefs ->
-        val num = prefs[Keys.BOOKMARK_SURAH_NUM]
-        val name = prefs[Keys.BOOKMARK_SURAH_NAME]
-        val ayah = prefs[Keys.BOOKMARK_AYAH_NUM]
-        val page = prefs[Keys.BOOKMARK_PAGE_NUM] ?: 1
-        if (num != null && name != null && ayah != null) {
+    val bookmarkFlow: Flow<QuranBookmark?> = safeDataFlow.map { prefs ->
+        val num = prefs.safeGetIntOrNull(Keys.BOOKMARK_SURAH_NUM)
+        val name = prefs.safeGetString(Keys.BOOKMARK_SURAH_NAME)
+        val ayah = prefs.safeGetIntOrNull(Keys.BOOKMARK_AYAH_NUM)
+        val page = prefs.safeGetInt(Keys.BOOKMARK_PAGE_NUM, 1).coerceIn(1, 604)
+        if (num != null && !name.isNullOrBlank() && ayah != null) {
             QuranBookmark(surahNumber = num, surahName = name, ayahNumber = ayah, pageNumber = page)
         } else null
-    }
+    }.catch { emit(null) }
 
     val lastMushafPageFlow: Flow<Int> = safeDataFlow.map { prefs ->
-        (prefs[Keys.LAST_MUSHAF_PAGE] ?: 1).coerceIn(1, 604)
-    }
+        prefs.safeGetInt(Keys.LAST_MUSHAF_PAGE, 1).coerceIn(1, 604)
+    }.catch { emit(1) }
 
-    val tasbihFlow: Flow<TasbihState> = context.rafiqDataStore.data.map { prefs ->
+    val tasbihFlow: Flow<TasbihState> = safeDataFlow.map { prefs ->
         TasbihState(
-            phrase = prefs[Keys.TASBIH_PHRASE] ?: "سبحان الله",
-            target = prefs[Keys.TASBIH_TARGET] ?: 33,
-            current = prefs[Keys.TASBIH_CURRENT] ?: 0,
-            rounds = prefs[Keys.TASBIH_ROUNDS] ?: 0,
-            lifetime = prefs[Keys.TASBIH_LIFETIME] ?: 0
+            phrase = prefs.safeGetString(Keys.TASBIH_PHRASE, "سبحان الله") ?: "سبحان الله",
+            target = prefs.safeGetInt(Keys.TASBIH_TARGET, 33).coerceAtLeast(1),
+            current = prefs.safeGetInt(Keys.TASBIH_CURRENT, 0).coerceAtLeast(0),
+            rounds = prefs.safeGetInt(Keys.TASBIH_ROUNDS, 0).coerceAtLeast(0),
+            lifetime = prefs.safeGetInt(Keys.TASBIH_LIFETIME, 0).coerceAtLeast(0)
         )
-    }
+    }.catch { emit(TasbihState()) }
 
-    val defaultMuezzinIdFlow: Flow<String> = context.rafiqDataStore.data.map {
-        it[Keys.DEFAULT_MUEZZIN_ID] ?: MuezzinLibraryData.defaultMuezzinId
-    }
+    val defaultMuezzinIdFlow: Flow<String> = safeDataFlow.map {
+        it.safeGetString(Keys.DEFAULT_MUEZZIN_ID, MuezzinLibraryData.defaultMuezzinId)
+            ?.takeIf { s -> s.isNotBlank() }
+            ?: MuezzinLibraryData.defaultMuezzinId
+    }.catch { emit(MuezzinLibraryData.defaultMuezzinId) }
 
-    val fajrMuezzinIdFlow: Flow<String> = context.rafiqDataStore.data.map {
-        it[Keys.FAJR_MUEZZIN_ID] ?: MuezzinLibraryData.defaultFajrMuezzinId
-    }
+    val fajrMuezzinIdFlow: Flow<String> = safeDataFlow.map {
+        it.safeGetString(Keys.FAJR_MUEZZIN_ID, MuezzinLibraryData.defaultFajrMuezzinId)
+            ?.takeIf { s -> s.isNotBlank() }
+            ?: MuezzinLibraryData.defaultFajrMuezzinId
+    }.catch { emit(MuezzinLibraryData.defaultFajrMuezzinId) }
 
-    val useDedicatedFajrAdhanFlow: Flow<Boolean> = context.rafiqDataStore.data.map {
-        it[Keys.USE_DEDICATED_FAJR_ADHAN] ?: true
-    }
+    val useDedicatedFajrAdhanFlow: Flow<Boolean> = safeDataFlow.map {
+        it.safeGetBoolean(Keys.USE_DEDICATED_FAJR_ADHAN, true)
+    }.catch { emit(true) }
 
-    val favoriteMuezzinIdsFlow: Flow<Set<String>> = context.rafiqDataStore.data.map {
-        it[Keys.FAVORITE_MUEZZIN_IDS] ?: setOf(MuezzinLibraryData.defaultMuezzinId)
-    }
+    val favoriteMuezzinIdsFlow: Flow<Set<String>> = safeDataFlow.map {
+        it.safeGetStringSet(Keys.FAVORITE_MUEZZIN_IDS, setOf(MuezzinLibraryData.defaultMuezzinId))
+    }.catch { emit(setOf(MuezzinLibraryData.defaultMuezzinId)) }
 
     val customMuezzinsFlow: Flow<List<MuezzinItem>> = safeDataFlow.map { prefs ->
-        val json = prefs[Keys.CUSTOM_MUEZZINS_JSON] ?: return@map emptyList()
-        runCatching { muezzinListAdapter.fromJson(json) }.getOrNull().orEmpty()
-    }
+        val json = prefs.safeGetString(Keys.CUSTOM_MUEZZINS_JSON) ?: return@map emptyList()
+        runCatching { muezzinListAdapter.fromJson(json) }
+            .getOrNull()
+            .orEmpty()
+            .filter { it.id.isNotBlank() && it.name.isNotBlank() }
+    }.catch { emit(emptyList()) }
 
     val muezzinAudioOverridesFlow: Flow<Map<String, MuezzinAudioOverride>> = safeDataFlow.map { prefs ->
-        val json = prefs[Keys.MUEZZIN_AUDIO_OVERRIDES_JSON] ?: return@map emptyMap()
+        val json = prefs.safeGetString(Keys.MUEZZIN_AUDIO_OVERRIDES_JSON) ?: return@map emptyMap()
         runCatching { muezzinOverrideListAdapter.fromJson(json) }
             .getOrNull()
             .orEmpty()
+            .filter { it.muezzinId.isNotBlank() }
             .associateBy { it.muezzinId }
-    }
+    }.catch { emit(emptyMap()) }
 
     val selectedQuranReciterFlow: Flow<ReciterOption> = safeDataFlow.map { prefs ->
-        val json = prefs[Keys.SELECTED_QURAN_RECITER_JSON]
+        val json = prefs.safeGetString(Keys.SELECTED_QURAN_RECITER_JSON)
         if (json.isNullOrBlank()) {
             OfflineIslamicData.reciters.first()
         } else {
-            runCatching { reciterAdapter.fromJson(json) }.getOrNull()
+            runCatching { reciterAdapter.fromJson(json) }
+                .getOrNull()
+                ?.takeIf { it.id.isNotBlank() && it.arabicName.isNotBlank() }
                 ?: OfflineIslamicData.reciters.first()
         }
-    }
+    }.catch { emit(OfflineIslamicData.reciters.first()) }
 
     val mushafPaperThemeFlow: Flow<MushafPaperTheme> = safeDataFlow.map { prefs ->
-        val raw = prefs[Keys.MUSHAF_PAPER_THEME]
+        val raw = prefs.safeGetString(Keys.MUSHAF_PAPER_THEME)
         MushafPaperTheme.entries.find { it.name == raw } ?: MushafPaperTheme.CREAM
-    }
+    }.catch { emit(MushafPaperTheme.CREAM) }
 
     val quranPlaybackSpeedFlow: Flow<Float> = safeDataFlow.map { prefs ->
-        (prefs[Keys.QURAN_PLAYBACK_SPEED] ?: 1.0f).coerceIn(0.5f, 2.0f)
-    }
+        prefs.safeGetFloat(Keys.QURAN_PLAYBACK_SPEED, 1.0f).coerceIn(0.5f, 2.0f)
+    }.catch { emit(1.0f) }
 
     val tajweedColorsEnabledFlow: Flow<Boolean> = safeDataFlow.map { prefs ->
-        prefs[Keys.TAJWEED_COLORS_ENABLED] ?: false
-    }
+        prefs.safeGetBoolean(Keys.TAJWEED_COLORS_ENABLED, false)
+    }.catch { emit(false) }
 
     val fajrAlarmSettingsFlow: Flow<FajrAlarmSettings> = safeDataFlow.map { prefs ->
-        val json = prefs[Keys.FAJR_ALARM_SETTINGS_JSON]
+        val json = prefs.safeGetString(Keys.FAJR_ALARM_SETTINGS_JSON)
         if (json.isNullOrBlank()) {
             FajrAlarmSettings()
         } else {
             runCatching { fajrAlarmAdapter.fromJson(json) }.getOrNull() ?: FajrAlarmSettings()
         }
-    }
+    }.catch { emit(FajrAlarmSettings()) }
 
     val favoriteHadithUidsFlow: Flow<Set<String>> = safeDataFlow.map { prefs ->
-        prefs[Keys.FAVORITE_HADITH_UIDS] ?: emptySet()
-    }
+        prefs.safeGetStringSet(Keys.FAVORITE_HADITH_UIDS, emptySet())
+    }.catch { emit(emptySet()) }
 
     val hadithFontSizeFlow: Flow<Float> = safeDataFlow.map { prefs ->
-        prefs[Keys.HADITH_FONT_SIZE] ?: 20f
-    }
+        prefs.safeGetFloat(Keys.HADITH_FONT_SIZE, 20f).coerceIn(14f, 36f)
+    }.catch { emit(20f) }
 
     val countdownNotificationEnabledFlow: Flow<Boolean> = safeDataFlow.map { prefs ->
-        prefs[Keys.COUNTDOWN_NOTIFICATION_ENABLED] ?: true
-    }
+        prefs.safeGetBoolean(Keys.COUNTDOWN_NOTIFICATION_ENABLED, false)
+    }.catch { emit(false) }
 
     val adhanSilenceOnVolumeFlow: Flow<Boolean> = safeDataFlow.map { prefs ->
-        prefs[Keys.ADHAN_SILENCE_ON_VOLUME] ?: true
-    }
+        prefs.safeGetBoolean(Keys.ADHAN_SILENCE_ON_VOLUME, true)
+    }.catch { emit(true) }
 
     val adhanSilenceOnFlipFlow: Flow<Boolean> = safeDataFlow.map { prefs ->
-        prefs[Keys.ADHAN_SILENCE_ON_FLIP] ?: true
-    }
+        prefs.safeGetBoolean(Keys.ADHAN_SILENCE_ON_FLIP, true)
+    }.catch { emit(true) }
 
     val wordByWordHighlightEnabledFlow: Flow<Boolean> = safeDataFlow.map { prefs ->
-        prefs[Keys.WORD_BY_WORD_HIGHLIGHT_ENABLED] ?: true
-    }
+        prefs.safeGetBoolean(Keys.WORD_BY_WORD_HIGHLIGHT_ENABLED, true)
+    }.catch { emit(true) }
 
     val syncOffsetBluetoothMsFlow: Flow<Int> = safeDataFlow.map { prefs ->
-        (prefs[Keys.SYNC_OFFSET_BLUETOOTH_MS] ?: 180).coerceIn(-300, 300)
-    }
+        prefs.safeGetInt(Keys.SYNC_OFFSET_BLUETOOTH_MS, 180).coerceIn(-300, 300)
+    }.catch { emit(180) }
 
     val syncOffsetSpeakerMsFlow: Flow<Int> = safeDataFlow.map { prefs ->
-        (prefs[Keys.SYNC_OFFSET_SPEAKER_MS] ?: 0).coerceIn(-300, 300)
-    }
+        prefs.safeGetInt(Keys.SYNC_OFFSET_SPEAKER_MS, 0).coerceIn(-300, 300)
+    }.catch { emit(0) }
 
     val lastHadithResumeFlow: Flow<Pair<String, Int>?> = safeDataFlow.map { prefs ->
-        val bookId = prefs[Keys.LAST_HADITH_BOOK_ID]
+        val bookId = prefs.safeGetString(Keys.LAST_HADITH_BOOK_ID)
         if (bookId.isNullOrBlank()) null
-        else bookId to (prefs[Keys.LAST_HADITH_SCROLL_INDEX] ?: 0).coerceAtLeast(0)
-    }
+        else bookId to prefs.safeGetInt(Keys.LAST_HADITH_SCROLL_INDEX, 0).coerceAtLeast(0)
+    }.catch { emit(null) }
 
     suspend fun setDarkMode(enabled: Boolean) {
-        context.rafiqDataStore.edit { it[Keys.DARK_MODE] = enabled }
+        runCatching { context.rafiqDataStore.edit { it[Keys.DARK_MODE] = enabled } }
     }
 
     suspend fun setSelectedCityId(cityId: String) {
-        context.rafiqDataStore.edit { it[Keys.SELECTED_CITY_ID] = cityId }
+        runCatching { context.rafiqDataStore.edit { it[Keys.SELECTED_CITY_ID] = cityId } }
     }
 
     suspend fun getTrackerDoneIds(todayKey: String): Set<String> {
-        val prefs = context.rafiqDataStore.data.first()
-        return if (prefs[Keys.TRACKER_DATE] == todayKey) {
-            prefs[Keys.TRACKER_DONE_IDS] ?: emptySet()
-        } else {
-            emptySet()
-        }
+        return runCatching {
+            val prefs = safeDataFlow.first()
+            if (prefs.safeGetString(Keys.TRACKER_DATE) == todayKey) {
+                prefs.safeGetStringSet(Keys.TRACKER_DONE_IDS, emptySet())
+            } else {
+                emptySet()
+            }
+        }.getOrDefault(emptySet())
     }
 
     suspend fun saveTrackerDoneIds(todayKey: String, ids: Set<String>) {
-        context.rafiqDataStore.edit {
-            it[Keys.TRACKER_DATE] = todayKey
-            it[Keys.TRACKER_DONE_IDS] = ids
+        runCatching {
+            context.rafiqDataStore.edit {
+                it[Keys.TRACKER_DATE] = todayKey
+                it[Keys.TRACKER_DONE_IDS] = ids
+            }
         }
     }
 
     suspend fun saveBookmark(bookmark: QuranBookmark) {
-        context.rafiqDataStore.edit {
-            it[Keys.BOOKMARK_SURAH_NUM] = bookmark.surahNumber
-            it[Keys.BOOKMARK_SURAH_NAME] = bookmark.surahName
-            it[Keys.BOOKMARK_AYAH_NUM] = bookmark.ayahNumber
-            it[Keys.BOOKMARK_PAGE_NUM] = bookmark.pageNumber.coerceIn(1, 604)
+        runCatching {
+            context.rafiqDataStore.edit {
+                it[Keys.BOOKMARK_SURAH_NUM] = bookmark.surahNumber
+                it[Keys.BOOKMARK_SURAH_NAME] = bookmark.surahName
+                it[Keys.BOOKMARK_AYAH_NUM] = bookmark.ayahNumber
+                it[Keys.BOOKMARK_PAGE_NUM] = bookmark.pageNumber.coerceIn(1, 604)
+            }
         }
     }
 
@@ -288,58 +313,66 @@ class AppPreferences(private val context: Context) {
     }
 
     suspend fun setQuranFontSize(sizeSp: Float) {
-        context.rafiqDataStore.edit { it[Keys.QURAN_FONT_SIZE] = sizeSp }
+        runCatching { context.rafiqDataStore.edit { it[Keys.QURAN_FONT_SIZE] = sizeSp } }
     }
 
     suspend fun saveTasbih(state: TasbihState) {
-        context.rafiqDataStore.edit {
-            it[Keys.TASBIH_PHRASE] = state.phrase
-            it[Keys.TASBIH_TARGET] = state.target
-            it[Keys.TASBIH_CURRENT] = state.current
-            it[Keys.TASBIH_ROUNDS] = state.rounds
-            it[Keys.TASBIH_LIFETIME] = state.lifetime
+        runCatching {
+            context.rafiqDataStore.edit {
+                it[Keys.TASBIH_PHRASE] = state.phrase
+                it[Keys.TASBIH_TARGET] = state.target
+                it[Keys.TASBIH_CURRENT] = state.current
+                it[Keys.TASBIH_ROUNDS] = state.rounds
+                it[Keys.TASBIH_LIFETIME] = state.lifetime
+            }
         }
     }
 
     suspend fun getAzkarRemaining(todayKey: String): Map<String, Int> {
-        val prefs = context.rafiqDataStore.data.first()
-        if (prefs[Keys.AZKAR_DATE] != todayKey) return emptyMap()
-        val json = prefs[Keys.AZKAR_REMAINING_JSON] ?: return emptyMap()
-        return runCatching { azkarMapAdapter.fromJson(json) }.getOrNull().orEmpty()
+        return runCatching {
+            val prefs = safeDataFlow.first()
+            if (prefs.safeGetString(Keys.AZKAR_DATE) != todayKey) return@runCatching emptyMap()
+            val json = prefs.safeGetString(Keys.AZKAR_REMAINING_JSON) ?: return@runCatching emptyMap()
+            runCatching { azkarMapAdapter.fromJson(json) }.getOrNull().orEmpty()
+        }.getOrDefault(emptyMap())
     }
 
     suspend fun saveAzkarRemaining(todayKey: String, map: Map<String, Int>) {
         val json = runCatching { azkarMapAdapter.toJson(map) }.getOrNull() ?: return
-        context.rafiqDataStore.edit {
-            it[Keys.AZKAR_DATE] = todayKey
-            it[Keys.AZKAR_REMAINING_JSON] = json
+        runCatching {
+            context.rafiqDataStore.edit {
+                it[Keys.AZKAR_DATE] = todayKey
+                it[Keys.AZKAR_REMAINING_JSON] = json
+            }
         }
     }
 
     suspend fun getCachedSurahs(): List<SurahSummary>? {
-        val json = context.rafiqDataStore.data.first()[Keys.SURAH_CACHE_JSON] ?: return null
-        return runCatching { surahListAdapter.fromJson(json) }.getOrNull()
+        return runCatching {
+            val json = safeDataFlow.first().safeGetString(Keys.SURAH_CACHE_JSON) ?: return@runCatching null
+            runCatching { surahListAdapter.fromJson(json) }.getOrNull()
+        }.getOrNull()
     }
 
     suspend fun cacheSurahs(surahs: List<SurahSummary>) {
         val json = runCatching { surahListAdapter.toJson(surahs) }.getOrNull() ?: return
-        context.rafiqDataStore.edit { it[Keys.SURAH_CACHE_JSON] = json }
+        runCatching { context.rafiqDataStore.edit { it[Keys.SURAH_CACHE_JSON] = json } }
     }
 
     suspend fun setDefaultMuezzinId(id: String) {
-        context.rafiqDataStore.edit { it[Keys.DEFAULT_MUEZZIN_ID] = id }
+        runCatching { context.rafiqDataStore.edit { it[Keys.DEFAULT_MUEZZIN_ID] = id } }
     }
 
     suspend fun setFajrMuezzinId(id: String) {
-        context.rafiqDataStore.edit { it[Keys.FAJR_MUEZZIN_ID] = id }
+        runCatching { context.rafiqDataStore.edit { it[Keys.FAJR_MUEZZIN_ID] = id } }
     }
 
     suspend fun setUseDedicatedFajrAdhan(enabled: Boolean) {
-        context.rafiqDataStore.edit { it[Keys.USE_DEDICATED_FAJR_ADHAN] = enabled }
+        runCatching { context.rafiqDataStore.edit { it[Keys.USE_DEDICATED_FAJR_ADHAN] = enabled } }
     }
 
     suspend fun saveFavoriteMuezzinIds(ids: Set<String>) {
-        context.rafiqDataStore.edit { it[Keys.FAVORITE_MUEZZIN_IDS] = ids }
+        runCatching { context.rafiqDataStore.edit { it[Keys.FAVORITE_MUEZZIN_IDS] = ids } }
     }
 
     suspend fun saveCustomMuezzins(items: List<MuezzinItem>) {
@@ -354,12 +387,14 @@ class AppPreferences(private val context: Context) {
 
     suspend fun saveSelectedQuranReciter(reciter: ReciterOption) {
         val json = runCatching { reciterAdapter.toJson(reciter) }.getOrNull() ?: return
-        context.rafiqDataStore.edit { it[Keys.SELECTED_QURAN_RECITER_JSON] = json }
+        runCatching { context.rafiqDataStore.edit { it[Keys.SELECTED_QURAN_RECITER_JSON] = json } }
     }
 
     suspend fun getCachedReciters(): List<ReciterOption>? {
-        val json = context.rafiqDataStore.data.first()[Keys.RECITERS_CACHE_JSON] ?: return null
-        return runCatching { reciterListAdapter.fromJson(json) }.getOrNull()
+        return runCatching {
+            val json = safeDataFlow.first().safeGetString(Keys.RECITERS_CACHE_JSON) ?: return@runCatching null
+            runCatching { reciterListAdapter.fromJson(json) }.getOrNull()
+        }.getOrNull()
     }
 
     suspend fun cacheReciters(reciters: List<ReciterOption>) {

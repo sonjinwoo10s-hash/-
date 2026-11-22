@@ -3,6 +3,8 @@ package com.example.audio
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.MediaPlayer
+import android.os.Build
+import android.os.SystemClock
 import com.example.data.local.OfflineIslamicData
 import com.example.data.model.AyahRepeatMode
 import com.example.data.model.ReciterOption
@@ -29,10 +31,13 @@ data class AudioPlayerState(
     val loadedSurahNumber: Int? = null,
     val loadedSurahName: String = "",
     val activeStreamUrl: String? = null,
+    val isPlayingOffline: Boolean = false,
     val usedFallbackStream: Boolean = false,
     val errorMessage: String? = null,
+    val activeVerseKey: String? = null,
     val syncedAyahNumber: Int? = null,
     val syncedWordIndex: Int? = null,
+    val isSingleAyahMode: Boolean = false,
     val hasOfficialTimings: Boolean = false,
     val hasWordTimings: Boolean = false,
     val wordByWordEnabled: Boolean = true,
@@ -80,14 +85,49 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
     private var sessionToken: Long = 0L
 
     // Single-Ayah bounded playback state (for "استماع لهذه الآية فقط" using seamless Surah timestamps)
-    private var singleAyahStopMs: Int? = null
+    private var playSingleAyahOnly: Boolean = false
+    private var stopAtMs: Int? = null
     private var singleAyahStartMs: Int? = null
     private var singleAyahRepeatMode: AyahRepeatMode = AyahRepeatMode.ONCE
     private var singleAyahRemainingRepeats: Int = 0
+    private var singleAyahSeekGraceUntilMs: Long = 0L
+    private var singleAyahFallbackCallback: (() -> Unit)? = null
     private var onSurahCompleteCallback: ((Int) -> Unit)? = null
 
     private val _state = MutableStateFlow(AudioPlayerState())
     val state: StateFlow<AudioPlayerState> = _state.asStateFlow()
+
+    private val _activeVerseKey = MutableStateFlow<String?>(null)
+    val activeVerseKey: StateFlow<String?> = _activeVerseKey.asStateFlow()
+
+    private val _activeWordIndex = MutableStateFlow<Int?>(null)
+    val activeWordIndex: StateFlow<Int?> = _activeWordIndex.asStateFlow()
+
+    private fun updateHighlightFlows(surahNumber: Int?, ayahNumber: Int?, wordIndex: Int?) {
+        val nextKey = if (surahNumber != null && ayahNumber != null) "$surahNumber:$ayahNumber" else null
+        val nextWord = if (nextKey != null) wordIndex else null
+        if (_activeVerseKey.value != nextKey) {
+            _activeVerseKey.value = nextKey
+        }
+        if (_activeWordIndex.value != nextWord) {
+            _activeWordIndex.value = nextWord
+        }
+    }
+
+    private fun seekPrecise(mp: MediaPlayer, targetMs: Int) {
+        val safeTarget = targetMs.coerceAtLeast(0)
+        if (playSingleAyahOnly) {
+            // Brief settle window so stale pre-seek currentPosition never triggers early pause
+            singleAyahSeekGraceUntilMs = SystemClock.elapsedRealtime() + 260L
+        }
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                mp.seekTo(safeTarget.toLong(), MediaPlayer.SEEK_CLOSEST)
+            } else {
+                mp.seekTo(safeTarget)
+            }
+        }
+    }
 
     fun attachContext(context: Context) {
         appContext = context.applicationContext
@@ -111,6 +151,9 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
         bluetoothOffsetMs: Int,
         speakerOffsetMs: Int
     ) {
+        if (!wordByWordEnabled) {
+            _activeWordIndex.value = null
+        }
         _state.update {
             it.copy(
                 wordByWordEnabled = wordByWordEnabled,
@@ -122,6 +165,9 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
     }
 
     fun setWordByWordEnabled(enabled: Boolean) {
+        if (!enabled) {
+            _activeWordIndex.value = null
+        }
         _state.update {
             it.copy(
                 wordByWordEnabled = enabled,
@@ -191,6 +237,7 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
         preparedSurahKey = null
         activeTimingMap = null
         clearSingleAyahBounds()
+        updateHighlightFlows(null, null, null)
 
         _state.update {
             it.copy(
@@ -202,8 +249,10 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
                 activeStreamUrl = surahNum?.let { n -> reciter.buildPrimaryAudioUrl(n) },
                 usedFallbackStream = false,
                 errorMessage = null,
+                activeVerseKey = null,
                 syncedAyahNumber = null,
                 syncedWordIndex = null,
+                isSingleAyahMode = false,
                 hasOfficialTimings = false,
                 hasWordTimings = false
             )
@@ -227,6 +276,7 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
             return
         }
         if (!current.isPlaying && !current.isBuffering) {
+            updateHighlightFlows(null, null, null)
             _state.update {
                 it.copy(
                     loadedSurahNumber = surahNumber,
@@ -235,8 +285,10 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
                     durationMs = 0,
                     activeStreamUrl = it.selectedReciter.buildPrimaryAudioUrl(surahNumber),
                     errorMessage = null,
+                    activeVerseKey = null,
                     syncedAyahNumber = null,
                     syncedWordIndex = null,
+                    isSingleAyahMode = false,
                     hasOfficialTimings = false,
                     hasWordTimings = false
                 )
@@ -255,12 +307,20 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
                 stopProgressTicker()
                 _state.update { it.copy(isPlaying = false) }
             } else {
+                // Explicitly switch to continuous full-Surah playback when tapping Surah Play
+                clearSingleAyahBounds()
                 runCatching {
                     mp.start()
                     applySpeedToPlayer(mp, _state.value.playbackSpeed)
                 }
                 startProgressTicker()
-                _state.update { it.copy(isPlaying = true, errorMessage = null) }
+                _state.update {
+                    it.copy(
+                        isPlaying = true,
+                        isSingleAyahMode = false,
+                        errorMessage = null
+                    )
+                }
             }
             return
         }
@@ -286,7 +346,8 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
             startAyahNumber = null,
             startWordIndex = null,
             singleAyahOnly = false,
-            repeatMode = AyahRepeatMode.ONCE
+            repeatMode = AyahRepeatMode.ONCE,
+            onSingleAyahFallbackRequired = null
         )
     }
 
@@ -309,7 +370,8 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
         startWordIndex: Int? = null,
         singleAyahOnly: Boolean = false,
         repeatMode: AyahRepeatMode = AyahRepeatMode.ONCE,
-        onSurahCompleted: ((Int) -> Unit)? = null
+        onSurahCompleted: ((Int) -> Unit)? = null,
+        onSingleAyahFallbackRequired: (() -> Unit)? = null
     ) {
         onSurahCompleteCallback = if (singleAyahOnly) null else onSurahCompleted
 
@@ -333,26 +395,40 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
                 } else {
                     ayahEntry.startMs
                 }
-                configureSingleAyahBounds(singleAyahOnly, ayahEntry.startMs, ayahEntry.endMs, repeatMode)
+                configureSingleAyahBounds(
+                    singleAyahOnly = singleAyahOnly,
+                    startMs = ayahEntry.startMs,
+                    endMs = ayahEntry.endMs,
+                    repeatMode = repeatMode,
+                    fallbackCallback = onSingleAyahFallbackRequired
+                )
+                seekPrecise(mp, targetMs)
                 runCatching {
-                    mp.seekTo(targetMs)
                     if (!mp.isPlaying) {
                         mp.start()
                         applySpeedToPlayer(mp, _state.value.playbackSpeed)
                     }
                 }
+                val resolvedWord = if (current.wordByWordEnabled && timing.hasWordSegments) {
+                    startWordIndex ?: ayahEntry.resolveWordAt(targetMs)
+                } else null
+                updateHighlightFlows(surahNumber, ayahEntry.ayahNumber, resolvedWord)
                 _state.update {
                     it.copy(
                         isPlaying = true,
+                        isSingleAyahMode = singleAyahOnly,
                         currentPositionMs = targetMs,
+                        activeVerseKey = "$surahNumber:${ayahEntry.ayahNumber}",
                         syncedAyahNumber = ayahEntry.ayahNumber,
-                        syncedWordIndex = if (it.wordByWordEnabled && timing.hasWordSegments) {
-                            startWordIndex ?: ayahEntry.resolveWordAt(targetMs)
-                        } else null,
+                        syncedWordIndex = resolvedWord,
                         errorMessage = null
                     )
                 }
                 startProgressTicker()
+                return
+            } else if (singleAyahOnly) {
+                // Never play full Surah when single-Ayah timing entry is missing
+                onSingleAyahFallbackRequired?.invoke()
                 return
             }
         }
@@ -363,7 +439,8 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
             startAyahNumber = startAyahNumber,
             startWordIndex = startWordIndex,
             singleAyahOnly = singleAyahOnly,
-            repeatMode = repeatMode
+            repeatMode = repeatMode,
+            onSingleAyahFallbackRequired = onSingleAyahFallbackRequired
         )
     }
 
@@ -388,21 +465,25 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
             entry.startMs
         }
         clearSingleAyahBounds()
+        seekPrecise(mp, targetMs)
         runCatching {
-            mp.seekTo(targetMs)
             if (!mp.isPlaying) {
                 mp.start()
                 applySpeedToPlayer(mp, current.playbackSpeed)
             }
         }
+        val resolvedWord = if (current.wordByWordEnabled && timing.hasWordSegments) {
+            wordIndexZeroBased ?: entry.resolveWordAt(targetMs)
+        } else null
+        updateHighlightFlows(surahNumber, entry.ayahNumber, resolvedWord)
         _state.update {
             it.copy(
                 isPlaying = true,
+                isSingleAyahMode = false,
                 currentPositionMs = targetMs,
+                activeVerseKey = "$surahNumber:${entry.ayahNumber}",
                 syncedAyahNumber = entry.ayahNumber,
-                syncedWordIndex = if (it.wordByWordEnabled && timing.hasWordSegments) {
-                    wordIndexZeroBased ?: entry.resolveWordAt(targetMs)
-                } else null
+                syncedWordIndex = resolvedWord
             )
         }
         startProgressTicker()
@@ -415,7 +496,8 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
         startAyahNumber: Int?,
         startWordIndex: Int?,
         singleAyahOnly: Boolean,
-        repeatMode: AyahRepeatMode
+        repeatMode: AyahRepeatMode,
+        onSingleAyahFallbackRequired: (() -> Unit)?
     ) {
         val reciter = _state.value.selectedReciter
         val targetKey = "${reciter.id}|${reciter.serverUrl}|$surahNumber"
@@ -425,6 +507,7 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
         preparedSurahKey = null
         activeTimingMap = null
         clearSingleAyahBounds()
+        updateHighlightFlows(null, null, null)
 
         _state.update {
             it.copy(
@@ -432,11 +515,13 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
                 loadedSurahName = surahName,
                 isBuffering = true,
                 isPlaying = false,
+                isSingleAyahMode = singleAyahOnly,
                 currentPositionMs = 0,
                 durationMs = 0,
                 activeStreamUrl = null,
                 usedFallbackStream = false,
                 errorMessage = null,
+                activeVerseKey = null,
                 syncedAyahNumber = null,
                 syncedWordIndex = null,
                 hasOfficialTimings = false,
@@ -445,13 +530,33 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
         }
 
         prepareFlowJob = scope.launch {
-            // 1. Fetch official Quran.com v4 chapter_recitations audio_url + timestamps (cached locally)
-            val officialTimings = QuranTimingRepository.fetchSurahTimings(appContext, reciter, surahNumber)
+            // 0. STRICT OFFLINE-FIRST PRIORITY: Always check local downloaded MP3 BEFORE any network call!
+            val localOfflineAudio = appContext?.let { ctx ->
+                com.example.data.local.PersistentOfflineStorage
+                    .getOfflineSurahAudioFile(ctx, reciter.id, surahNumber)
+                    .takeIf { it.exists() && it.isFile && it.length() > 1_024L }
+                    ?.absolutePath
+            }
+            if (token != sessionToken) return@launch
+
+            // If local MP3 exists for full-Surah playback, NEVER block on network timings:
+            // read ONLY local disk cached timings (zero latency) and play local file immediately!
+            val officialTimings = if (localOfflineAudio != null && !singleAyahOnly && startAyahNumber == null) {
+                QuranTimingRepository.getCachedSurahTimingsLocalOnly(appContext, reciter, surahNumber)
+            } else {
+                QuranTimingRepository.getCachedSurahTimingsLocalOnly(appContext, reciter, surahNumber)
+                    ?: QuranTimingRepository.fetchSurahTimings(appContext, reciter, surahNumber)
+            }
             if (token != sessionToken) return@launch
 
             if (officialTimings != null) {
-                activeTimingMap = officialTimings
                 val startEntry = startAyahNumber?.let { officialTimings.findAyahEntry(it) }
+                if (singleAyahOnly && startEntry == null) {
+                    abortSingleAyahToPerVerseFallback(onSingleAyahFallbackRequired)
+                    return@launch
+                }
+
+                activeTimingMap = officialTimings
                 val initialSeekMs = if (startEntry != null) {
                     if (startWordIndex != null) {
                         startEntry.findWordStartMs(startWordIndex) ?: startEntry.startMs
@@ -461,29 +566,34 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
                 } else 0
 
                 if (startEntry != null) {
-                    configureSingleAyahBounds(singleAyahOnly, startEntry.startMs, startEntry.endMs, repeatMode)
+                    configureSingleAyahBounds(
+                        singleAyahOnly = singleAyahOnly,
+                        startMs = startEntry.startMs,
+                        endMs = startEntry.endMs,
+                        repeatMode = repeatMode,
+                        fallbackCallback = onSingleAyahFallbackRequired
+                    )
                 }
+
+                val initialAyah = startEntry?.ayahNumber
+                val initialWord = if (_state.value.wordByWordEnabled && officialTimings.hasWordSegments && startEntry != null) {
+                    startWordIndex ?: startEntry.resolveWordAt(initialSeekMs)
+                } else null
+                updateHighlightFlows(surahNumber, initialAyah, initialWord)
 
                 _state.update {
                     it.copy(
                         hasOfficialTimings = true,
                         hasWordTimings = officialTimings.hasWordSegments,
-                        syncedAyahNumber = startEntry?.ayahNumber,
-                        syncedWordIndex = if (it.wordByWordEnabled && officialTimings.hasWordSegments && startEntry != null) {
-                            startWordIndex ?: startEntry.resolveWordAt(initialSeekMs)
-                        } else null
+                        isSingleAyahMode = singleAyahOnly,
+                        activeVerseKey = initialAyah?.let { a -> "$surahNumber:$a" },
+                        syncedAyahNumber = initialAyah,
+                        syncedWordIndex = initialWord
                     )
                 }
 
-                // Prefer persistent offline MP3 in filesDir/offline_quran/audio/ if already downloaded
-                val localOfflineAudio = appContext?.let { ctx ->
-                    com.example.data.local.PersistentOfflineStorage.getOfflineSurahAudioFile(ctx, reciter.id, surahNumber)
-                        .takeIf { it.exists() && it.length() > 1_024L }
-                        ?.absolutePath
-                }
-
-                // Play the EXACT official Quran.com audio_url (or its downloaded local file) that matches timestamps 1:1
-                val fallbackUrls = reciter.buildCandidateAudioUrls(surahNumber)
+                // Strict offline-first: local file is ALWAYS index 0 when present!
+                val fallbackUrls = if (singleAyahOnly) emptyList() else reciter.buildCandidateAudioUrls(surahNumber)
                 val allUrls = buildList {
                     if (localOfflineAudio != null) add(localOfflineAudio)
                     add(officialTimings.quranComAudioUrl)
@@ -500,14 +610,14 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
                     initialSeekMs = initialSeekMs
                 )
             } else {
-                // 2. Smart Fallback for mp3quran.net reciters without Quran.com timestamps:
-                // Play local offline MP3 if downloaded, otherwise stream full-Surah MP3 with highlighting disabled.
-                activeTimingMap = null
-                val localOfflineAudio = appContext?.let { ctx ->
-                    com.example.data.local.PersistentOfflineStorage.getOfflineSurahAudioFile(ctx, reciter.id, surahNumber)
-                        .takeIf { it.exists() && it.length() > 1_024L }
-                        ?.absolutePath
+                if (singleAyahOnly) {
+                    abortSingleAyahToPerVerseFallback(onSingleAyahFallbackRequired)
+                    return@launch
                 }
+
+                // Play local offline MP3 FIRST with zero internet requirement; only fall back to streaming if not downloaded
+                activeTimingMap = null
+                updateHighlightFlows(null, null, null)
                 val urls = buildList {
                     if (localOfflineAudio != null) add(localOfflineAudio)
                     addAll(reciter.buildCandidateAudioUrls(surahNumber))
@@ -526,6 +636,28 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
         }
     }
 
+    private fun abortSingleAyahToPerVerseFallback(callback: (() -> Unit)?) {
+        releasePlayerOnly()
+        activeTimingMap = null
+        preparedSurahKey = null
+        clearSingleAyahBounds()
+        updateHighlightFlows(null, null, null)
+        _state.update {
+            it.copy(
+                isBuffering = false,
+                isPlaying = false,
+                isSingleAyahMode = false,
+                hasOfficialTimings = false,
+                hasWordTimings = false,
+                activeVerseKey = null,
+                syncedAyahNumber = null,
+                syncedWordIndex = null,
+                errorMessage = null
+            )
+        }
+        callback?.invoke()
+    }
+
     private fun tryStreamIndex(
         surahNumber: Int,
         surahName: String,
@@ -538,14 +670,23 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
     ) {
         if (token != sessionToken) return
         if (index >= urls.size) {
+            val fallbackCb = if (playSingleAyahOnly) singleAyahFallbackCallback else null
+            if (fallbackCb != null) {
+                abortSingleAyahToPerVerseFallback(fallbackCb)
+                return
+            }
             releasePlayerOnly()
             activeTimingMap = null
+            clearSingleAyahBounds()
+            updateHighlightFlows(null, null, null)
             _state.update {
                 it.copy(
                     isBuffering = false,
                     isPlaying = false,
+                    isSingleAyahMode = false,
                     hasOfficialTimings = false,
                     hasWordTimings = false,
+                    activeVerseKey = null,
                     syncedAyahNumber = null,
                     syncedWordIndex = null,
                     errorMessage = "تعذّر تشغيل التلاوة حالياً، تأكد من الاتصال بالإنترنت أو جرّب قارئاً آخر"
@@ -555,45 +696,55 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
         }
 
         val url = urls[index]
-        val isFallback = index > 0 && !url.startsWith("/")
+        val isLocalFile = url.startsWith("/")
+        val isFallback = index > 0 && !isLocalFile
         val usingOfficialAudio = isOfficialFirstUrl && (
             index == 0 || url == activeTimingMap?.quranComAudioUrl
         )
 
-        // If official Quran.com audio failed and we fell back to mp3quran.net, disable timestamps so highlight is never misaligned
         if (!usingOfficialAudio) {
+            if (playSingleAyahOnly) {
+                val cb = singleAyahFallbackCallback
+                abortSingleAyahToPerVerseFallback(cb)
+                return
+            }
             activeTimingMap = null
             clearSingleAyahBounds()
+            updateHighlightFlows(null, null, null)
         }
 
         releasePlayerOnly()
 
         _state.update {
             it.copy(
-                isBuffering = true,
+                isBuffering = !isLocalFile,
                 activeStreamUrl = url,
+                isPlayingOffline = isLocalFile,
                 usedFallbackStream = isFallback,
                 hasOfficialTimings = usingOfficialAudio && activeTimingMap != null,
                 hasWordTimings = usingOfficialAudio && (activeTimingMap?.hasWordSegments == true),
+                activeVerseKey = if (usingOfficialAudio) it.activeVerseKey else null,
                 syncedAyahNumber = if (usingOfficialAudio) it.syncedAyahNumber else null,
                 syncedWordIndex = if (usingOfficialAudio) it.syncedWordIndex else null,
                 errorMessage = null
             )
         }
 
-        timeoutJob = scope.launch(Dispatchers.Main) {
-            delay(10_000L)
-            if (token == sessionToken && _state.value.isBuffering) {
-                tryStreamIndex(
-                    surahNumber = surahNumber,
-                    surahName = surahName,
-                    targetKey = targetKey,
-                    urls = urls,
-                    index = index + 1,
-                    token = token,
-                    isOfficialFirstUrl = isOfficialFirstUrl,
-                    initialSeekMs = initialSeekMs
-                )
+        if (!isLocalFile) {
+            timeoutJob = scope.launch(Dispatchers.Main) {
+                delay(10_000L)
+                if (token == sessionToken && _state.value.isBuffering) {
+                    tryStreamIndex(
+                        surahNumber = surahNumber,
+                        surahName = surahName,
+                        targetKey = targetKey,
+                        urls = urls,
+                        index = index + 1,
+                        token = token,
+                        isOfficialFirstUrl = isOfficialFirstUrl,
+                        initialSeekMs = initialSeekMs
+                    )
+                }
             }
         }
 
@@ -605,7 +756,13 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
                         .setUsage(AudioAttributes.USAGE_MEDIA)
                         .build()
                 )
-                setDataSource(url)
+                if (isLocalFile) {
+                    java.io.FileInputStream(url).use { fis ->
+                        setDataSource(fis.fd)
+                    }
+                } else {
+                    setDataSource(url)
+                }
                 setOnPreparedListener { player ->
                     if (token != sessionToken) {
                         runCatching { player.release() }
@@ -618,7 +775,7 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
                         initialSeekMs
                     } else 0
                     if (safeSeek > 0) {
-                        runCatching { player.seekTo(safeSeek) }
+                        seekPrecise(player, safeSeek)
                     }
                     player.start()
                     applySpeedToPlayer(player, _state.value.playbackSpeed)
@@ -629,22 +786,29 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
                         timing.resolveAtPosition(eff)
                     } else null
 
+                    val nextAyah = resolved?.first ?: if (usingOfficialAudio) _state.value.syncedAyahNumber else null
+                    val nextWord = if (usingOfficialAudio && _state.value.wordByWordEnabled && timing?.hasWordSegments == true) {
+                        resolved?.second ?: _state.value.syncedWordIndex
+                    } else null
+                    updateHighlightFlows(if (usingOfficialAudio) surahNumber else null, nextAyah, nextWord)
+
                     _state.update {
                         it.copy(
                             loadedSurahNumber = surahNumber,
                             loadedSurahName = surahName,
                             isBuffering = false,
                             isPlaying = true,
+                            isPlayingOffline = isLocalFile,
+                            isSingleAyahMode = playSingleAyahOnly,
                             durationMs = dur,
                             currentPositionMs = safeSeek,
                             activeStreamUrl = url,
                             usedFallbackStream = isFallback,
                             hasOfficialTimings = usingOfficialAudio && timing != null,
                             hasWordTimings = usingOfficialAudio && (timing?.hasWordSegments == true),
-                            syncedAyahNumber = resolved?.first ?: if (usingOfficialAudio) it.syncedAyahNumber else null,
-                            syncedWordIndex = if (usingOfficialAudio && it.wordByWordEnabled && timing?.hasWordSegments == true) {
-                                resolved?.second
-                            } else null,
+                            activeVerseKey = if (usingOfficialAudio && nextAyah != null) "$surahNumber:$nextAyah" else null,
+                            syncedAyahNumber = nextAyah,
+                            syncedWordIndex = nextWord,
                             errorMessage = null
                         )
                     }
@@ -653,15 +817,17 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
                 setOnCompletionListener {
                     if (token != sessionToken) return@setOnCompletionListener
                     stopProgressTicker()
-                    val singleEnd = singleAyahStopMs
-                    if (singleEnd != null && handleSingleAyahBoundaryReached(this)) {
+                    if (playSingleAyahOnly && stopAtMs != null && handleSingleAyahBoundaryReached(this)) {
                         return@setOnCompletionListener
                     }
                     clearSingleAyahBounds()
+                    updateHighlightFlows(null, null, null)
                     _state.update {
                         it.copy(
                             isPlaying = false,
+                            isSingleAyahMode = false,
                             currentPositionMs = 0,
+                            activeVerseKey = null,
                             syncedAyahNumber = null,
                             syncedWordIndex = null
                         )
@@ -707,7 +873,7 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
         if (duration > 0) {
             clearSingleAyahBounds()
             val targetMs = (fraction.coerceIn(0f, 1f) * duration).toInt()
-            runCatching { mp.seekTo(targetMs) }
+            seekPrecise(mp, targetMs)
             val timing = activeTimingMap
             val current = _state.value
             val resolved = if (timing != null && current.hasOfficialTimings) {
@@ -715,13 +881,21 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
                 timing.resolveAtPosition(effectiveMs)
             } else null
 
+            val nextAyah = resolved?.first
+            val nextWord = if (current.wordByWordEnabled && timing?.hasWordSegments == true) {
+                resolved?.second
+            } else null
+            updateHighlightFlows(current.loadedSurahNumber, nextAyah, nextWord)
+
             _state.update {
                 it.copy(
                     currentPositionMs = targetMs,
-                    syncedAyahNumber = resolved?.first,
-                    syncedWordIndex = if (it.wordByWordEnabled && timing?.hasWordSegments == true) {
-                        resolved?.second
-                    } else null
+                    isSingleAyahMode = false,
+                    activeVerseKey = if (it.loadedSurahNumber != null && nextAyah != null) {
+                        "${it.loadedSurahNumber}:$nextAyah"
+                    } else null,
+                    syncedAyahNumber = nextAyah,
+                    syncedWordIndex = nextWord
                 )
             }
         }
@@ -735,6 +909,7 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
         clearSingleAyahBounds()
         releasePlayerOnly()
         preparedSurahKey = null
+        updateHighlightFlows(null, null, null)
         val cur = _state.value
         _state.value = AudioPlayerState(
             selectedReciter = cur.selectedReciter,
@@ -763,6 +938,7 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
         clearSingleAyahBounds()
         releasePlayerOnly()
         preparedSurahKey = null
+        updateHighlightFlows(null, null, null)
         val cur = _state.value
         _state.value = AudioPlayerState(
             selectedReciter = if (keepReciter) cur.selectedReciter else OfflineIslamicData.reciters.first(),
@@ -778,15 +954,18 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
         singleAyahOnly: Boolean,
         startMs: Int,
         endMs: Int,
-        repeatMode: AyahRepeatMode
+        repeatMode: AyahRepeatMode,
+        fallbackCallback: (() -> Unit)? = null
     ) {
         if (!singleAyahOnly) {
             clearSingleAyahBounds()
             return
         }
+        playSingleAyahOnly = true
         singleAyahStartMs = startMs
-        singleAyahStopMs = endMs
+        stopAtMs = endMs
         singleAyahRepeatMode = repeatMode
+        singleAyahFallbackCallback = fallbackCallback
         singleAyahRemainingRepeats = when (repeatMode) {
             AyahRepeatMode.ONCE -> 0
             AyahRepeatMode.THREE -> 2
@@ -796,36 +975,38 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
     }
 
     private fun clearSingleAyahBounds() {
+        playSingleAyahOnly = false
         singleAyahStartMs = null
-        singleAyahStopMs = null
+        stopAtMs = null
         singleAyahRepeatMode = AyahRepeatMode.ONCE
         singleAyahRemainingRepeats = 0
+        singleAyahSeekGraceUntilMs = 0L
+        singleAyahFallbackCallback = null
     }
 
     private fun handleSingleAyahBoundaryReached(mp: MediaPlayer): Boolean {
         val startMs = singleAyahStartMs ?: return false
         if (singleAyahRepeatMode == AyahRepeatMode.CONTINUOUS) {
-            runCatching {
-                mp.seekTo(startMs)
-                if (!mp.isPlaying) mp.start()
-            }
+            seekPrecise(mp, startMs)
+            runCatching { if (!mp.isPlaying) mp.start() }
             return true
         }
         if (singleAyahRemainingRepeats > 0) {
             singleAyahRemainingRepeats--
-            runCatching {
-                mp.seekTo(startMs)
-                if (!mp.isPlaying) mp.start()
-            }
+            seekPrecise(mp, startMs)
+            runCatching { if (!mp.isPlaying) mp.start() }
             return true
         }
-        // Finished single Ayah cleanly -> pause & clear highlight
+        // Finished single Ayah cleanly -> immediately pause & clear highlight
         clearSingleAyahBounds()
         runCatching { if (mp.isPlaying) mp.pause() }
         stopProgressTicker()
+        updateHighlightFlows(null, null, null)
         _state.update {
             it.copy(
                 isPlaying = false,
+                isSingleAyahMode = false,
+                activeVerseKey = null,
                 syncedAyahNumber = null,
                 syncedWordIndex = null
             )
@@ -842,9 +1023,13 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
         val nextAyah = resolved?.first
         val nextWord = if (cur.wordByWordEnabled && timing.hasWordSegments) resolved?.second else null
         if (nextAyah != cur.syncedAyahNumber || nextWord != cur.syncedWordIndex) {
+            updateHighlightFlows(cur.loadedSurahNumber, nextAyah, nextWord)
             _state.update {
                 it.copy(
                     currentPositionMs = posMs,
+                    activeVerseKey = if (it.loadedSurahNumber != null && nextAyah != null) {
+                        "${it.loadedSurahNumber}:$nextAyah"
+                    } else null,
                     syncedAyahNumber = nextAyah,
                     syncedWordIndex = nextWord
                 )
@@ -889,10 +1074,16 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
                     val effectiveMs = (posMs - cur.activeLatencyOffsetMs).coerceAtLeast(0)
 
                     // Check exact single-Ayah end boundary when playing a single Ayah only
-                    val stopBoundary = singleAyahStopMs
-                    if (stopBoundary != null && effectiveMs >= stopBoundary) {
+                    val stopBoundary = stopAtMs
+                    if (playSingleAyahOnly &&
+                        stopBoundary != null &&
+                        SystemClock.elapsedRealtime() >= singleAyahSeekGraceUntilMs &&
+                        effectiveMs >= stopBoundary
+                    ) {
                         val looped = handleSingleAyahBoundaryReached(mp)
                         if (!looped) break
+                        delay(50L)
+                        continue
                     }
 
                     val timing = activeTimingMap
@@ -908,16 +1099,24 @@ class QuranAudioPlayer(private val scope: CoroutineScope) {
                     val highlightChanged = nextAyah != cur.syncedAyahNumber || nextWord != cur.syncedWordIndex
                     val shouldUpdateSeekBar = (tickCount % 5 == 0) // every 250ms for smooth seekbar without spamming Compose
 
+                    if (highlightChanged) {
+                        updateHighlightFlows(cur.loadedSurahNumber, nextAyah, nextWord)
+                    }
+
                     if (highlightChanged || shouldUpdateSeekBar) {
                         val durMs = if (shouldUpdateSeekBar) {
                             runCatching { mp.duration }.getOrDefault(cur.durationMs).coerceAtLeast(0)
                         } else {
                             cur.durationMs
                         }
+                        val nextKey = if (cur.loadedSurahNumber != null && nextAyah != null) {
+                            "${cur.loadedSurahNumber}:$nextAyah"
+                        } else null
                         _state.update {
                             it.copy(
                                 currentPositionMs = posMs,
                                 durationMs = durMs,
+                                activeVerseKey = nextKey,
                                 syncedAyahNumber = nextAyah,
                                 syncedWordIndex = nextWord
                             )

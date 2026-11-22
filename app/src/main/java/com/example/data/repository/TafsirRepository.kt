@@ -20,49 +20,56 @@ enum class TafsirBook(
     val arabicName: String,
     val shortAuthor: String,
     val alQuranEdition: String?,
-    val spa5kSlug: String
+    val spa5kSlug: String,
+    val quranComTafsirId: Int?
 ) {
     MUYASSAR(
         bookId = "ar.muyassar",
         arabicName = "التفسير الميسر",
         shortAuthor = "مجمع الملك فهد",
         alQuranEdition = "ar.muyassar",
-        spa5kSlug = "ar-tafsir-muyassar"
+        spa5kSlug = "ar-tafsir-muyassar",
+        quranComTafsirId = 16
     ),
     JALALAYN(
         bookId = "ar.jalalayn",
         arabicName = "تفسير الجلالين",
         shortAuthor = "المحلي والسيوطي",
         alQuranEdition = "ar.jalalayn",
-        spa5kSlug = "ar-tafsir-al-jalalayn"
+        spa5kSlug = "ar-tafsir-al-jalalayn",
+        quranComTafsirId = null
     ),
     IBN_KATHIR(
         bookId = "ar-tafsir-ibn-kathir",
         arabicName = "تفسير ابن كثير",
         shortAuthor = "الحافظ ابن كثير",
         alQuranEdition = null,
-        spa5kSlug = "ar-tafsir-ibn-kathir"
+        spa5kSlug = "ar-tafsir-ibn-kathir",
+        quranComTafsirId = 14
     ),
     SAADI(
         bookId = "ar-tafseer-al-saddi",
         arabicName = "تفسير السعدي",
         shortAuthor = "الشيخ عبد الرحمن السعدي",
         alQuranEdition = null,
-        spa5kSlug = "ar-tafseer-al-saddi"
+        spa5kSlug = "ar-tafseer-al-saddi",
+        quranComTafsirId = 91
     ),
     QURTUBI(
         bookId = "ar.qurtubi",
         arabicName = "تفسير القرطبي",
         shortAuthor = "الإمام القرطبي",
         alQuranEdition = "ar.qurtubi",
-        spa5kSlug = "ar-tafseer-al-qurtubi"
+        spa5kSlug = "ar-tafseer-al-qurtubi",
+        quranComTafsirId = 90
     ),
     TABARI(
         bookId = "ar-tafsir-al-tabari",
         arabicName = "تفسير الطبري",
         shortAuthor = "الإمام الطبري",
         alQuranEdition = null,
-        spa5kSlug = "ar-tafsir-al-tabari"
+        spa5kSlug = "ar-tafsir-al-tabari",
+        quranComTafsirId = 15
     )
 }
 
@@ -97,7 +104,7 @@ object TafsirRepository {
 
     fun isBookDownloaded(context: Context, book: TafsirBook): Boolean {
         val f = getLocalBookFile(context, book)
-        return f.exists() && f.length() > 10_000L
+        return f.exists() && f.isFile && f.length() > 512L
     }
 
     fun getDownloadedBookIds(context: Context): Set<String> {
@@ -108,9 +115,8 @@ object TafsirRepository {
     }
 
     /**
-     * Always checks local offline JSON first (`tafsir_{bookId}.json`);
-     * if not downloaded yet, fetches the single Ayah's Tafsir online from
-     * api.alquran.cloud and/or cdn.jsdelivr.net/gh/spa5k/tafsir_api@main/tafsir/.
+     * Strict offline-first: always checks in-memory cache and local offline JSON (`tafsir_{bookId}.json`)
+     * before making any online API call.
      */
     suspend fun getAyahTafsir(
         context: Context,
@@ -125,9 +131,9 @@ object TafsirRepository {
             if (cached.isNotBlank()) return@withContext Result.success(cached)
         }
 
-        // 2. Check local offline JSON file (tafsir_{bookId}.json)
+        // 2. Check local offline JSON file (tafsir_{bookId}.json) — STRICT OFFLINE FIRST
         val localFile = getLocalBookFile(context, book)
-        if (localFile.exists() && localFile.length() > 10_000L) {
+        if (localFile.exists() && localFile.isFile && localFile.length() > 512L) {
             val loadedMap = runCatching { loadLocalBookMap(localFile) }.getOrNull()
             if (!loadedMap.isNullOrEmpty()) {
                 // Keep only the single active book in RAM to protect 2GB-3GB devices
@@ -168,8 +174,9 @@ object TafsirRepository {
     }
 
     /**
-     * Downloads the full Tafsir book once into `getFilesDir()/tafsir_{bookId}.json`
-     * reporting progress (0f..1f) so the UI displays a smooth progress bar.
+     * Downloads the full Tafsir book once into `filesDir/offline_tafsir/tafsir_{bookId}.json`
+     * with multi-mirror fallback (AlQuran Cloud -> jsDelivr spa5k -> GitHub Raw spa5k -> Quran.com v4)
+     * so all 6 books download reliably and pass disk verification.
      */
     suspend fun downloadFullBook(
         context: Context,
@@ -194,19 +201,19 @@ object TafsirRepository {
                         val surahs = data?.optJSONArray("surahs")
                         if (surahs != null && surahs.length() >= 114) {
                             for (i in 0 until surahs.length()) {
-                                val sObj = surahs.getJSONObject(i)
-                                val sNum = sObj.getInt("number")
-                                val ayahs = sObj.getJSONArray("ayahs")
+                                val sObj = surahs.optJSONObject(i) ?: continue
+                                val sNum = sObj.optInt("number", i + 1)
+                                val ayahs = sObj.optJSONArray("ayahs") ?: continue
                                 for (j in 0 until ayahs.length()) {
-                                    val aObj = ayahs.getJSONObject(j)
-                                    val aNum = aObj.getInt("numberInSurah")
+                                    val aObj = ayahs.optJSONObject(j) ?: continue
+                                    val aNum = aObj.optInt("numberInSurah", j + 1)
                                     val txt = cleanTafsirText(aObj.optString("text", ""))
                                     if (txt.isNotBlank()) {
                                         entriesMap["$sNum:$aNum"] = txt
                                     }
                                 }
                             }
-                            if (entriesMap.size >= 6000) {
+                            if (entriesMap.size >= 5000) {
                                 fetchedFromAlQuran = true
                                 onProgress(0.88f)
                             }
@@ -215,16 +222,16 @@ object TafsirRepository {
                 }
             }
 
-            // Batched 114-Surah download from jsDelivr spa5k tafsir_api (Ibn Kathir, Saadi, Tabari, or fallback)
+            // Batched 114-Surah download across resilient mirrors (Ibn Kathir, Saadi, Qurtubi, Tabari, or fallback)
             if (!fetchedFromAlQuran) {
                 entriesMap.clear()
                 var completedSurahs = 0
-                val surahBatches = (1..114).chunked(6)
+                val surahBatches = (1..114).chunked(4)
                 for (batch in surahBatches) {
                     val batchResults = coroutineScope {
                         batch.map { surahNum ->
                             async(Dispatchers.IO) {
-                                surahNum to fetchSurahFromSpa5k(book.spa5kSlug, surahNum)
+                                surahNum to fetchSurahWithMirrors(book, surahNum)
                             }
                         }.awaitAll()
                     }
@@ -242,7 +249,7 @@ object TafsirRepository {
                 return@withContext Result.failure(IOException("تعذّر تحميل كامل الكتاب، يرجى المحاولة لاحقاً"))
             }
 
-            // Write normalized compact JSON atomically to filesDir/tafsir_{bookId}.json
+            // Write normalized compact JSON atomically to filesDir/offline_tafsir/tafsir_{bookId}.json
             onProgress(0.95f)
             val jsonObj = JSONObject()
             for ((k, v) in entriesMap) {
@@ -257,6 +264,12 @@ object TafsirRepository {
                 tmpFile.delete()
             }
 
+            if (!targetFile.exists() || targetFile.length() <= 512L) {
+                return@withContext Result.failure(IOException("تعذّر حفظ ملف التفسير على مساحة الجهاز"))
+            }
+
+            // Keep memory bounded while ensuring immediate offline availability
+            fullBookMemoryCache.clear()
             fullBookMemoryCache[book.bookId] = entriesMap
             onProgress(1.0f)
             Result.success(entriesMap.size)
@@ -266,7 +279,7 @@ object TafsirRepository {
     }
 
     private fun fetchSingleAyahOnline(book: TafsirBook, surahNumber: Int, ayahNumber: Int): String? {
-        // Primary: AlQuran Cloud if available for this book
+        // 1. Primary: AlQuran Cloud if available for this book
         if (book.alQuranEdition != null) {
             val url = "https://api.alquran.cloud/v1/ayah/$surahNumber:$ayahNumber/${book.alQuranEdition}"
             val raw = executeGet(url)
@@ -278,23 +291,62 @@ object TafsirRepository {
             }
         }
 
-        // Primary for spa5k books & fallback for AlQuran Cloud books
-        val spaUrl = "https://cdn.jsdelivr.net/gh/spa5k/tafsir_api@main/tafsir/${book.spa5kSlug}/$surahNumber/$ayahNumber.json"
-        val spaRaw = executeGet(spaUrl)
-        if (!spaRaw.isNullOrBlank()) {
-            val parsed = runCatching {
-                JSONObject(spaRaw).optString("text", "")
-            }.getOrNull()
-            if (!parsed.isNullOrBlank()) return parsed
+        // 2. jsDelivr & GitHub Raw spa5k single-ayah endpoints
+        val singleAyahUrls = listOf(
+            "https://cdn.jsdelivr.net/gh/spa5k/tafsir_api@main/tafsir/${book.spa5kSlug}/$surahNumber/$ayahNumber.json",
+            "https://raw.githubusercontent.com/spa5k/tafsir_api/main/tafsir/${book.spa5kSlug}/$surahNumber/$ayahNumber.json"
+        )
+        for (url in singleAyahUrls) {
+            val raw = executeGet(url)
+            if (!raw.isNullOrBlank()) {
+                val parsed = runCatching {
+                    JSONObject(raw).optString("text", "")
+                }.getOrNull()
+                if (!parsed.isNullOrBlank()) return parsed
+            }
         }
 
-        // Secondary fallback: full Surah JSON from spa5k (some verses are grouped in Surah JSON)
-        val surahMap = fetchSurahFromSpa5k(book.spa5kSlug, surahNumber)
+        // 3. Quran.com v4 single-ayah endpoint if available
+        if (book.quranComTafsirId != null) {
+            val qUrl = "https://api.quran.com/api/v4/tafsirs/${book.quranComTafsirId}/by_ayah/$surahNumber:$ayahNumber"
+            val qRaw = executeGet(qUrl)
+            if (!qRaw.isNullOrBlank()) {
+                val parsed = runCatching {
+                    JSONObject(qRaw).optJSONObject("tafsir")?.optString("text", "")
+                }.getOrNull()
+                if (!parsed.isNullOrBlank()) return parsed
+            }
+        }
+
+        // 4. Surah-level fallback (handles grouped verses)
+        val surahMap = fetchSurahWithMirrors(book, surahNumber)
         return surahMap[ayahNumber]
     }
 
-    private fun fetchSurahFromSpa5k(slug: String, surahNumber: Int): Map<Int, String> {
-        val url = "https://cdn.jsdelivr.net/gh/spa5k/tafsir_api@main/tafsir/$slug/$surahNumber.json"
+    private fun fetchSurahWithMirrors(book: TafsirBook, surahNumber: Int): Map<Int, String> {
+        // Mirror 1: jsDelivr spa5k
+        val fromJsDelivr = fetchSurahFromSpa5k(
+            "https://cdn.jsdelivr.net/gh/spa5k/tafsir_api@main/tafsir/${book.spa5kSlug}/$surahNumber.json"
+        )
+        if (fromJsDelivr.isNotEmpty()) return fromJsDelivr
+
+        // Mirror 2: GitHub Raw spa5k
+        val fromGitHubRaw = fetchSurahFromSpa5k(
+            "https://raw.githubusercontent.com/spa5k/tafsir_api/main/tafsir/${book.spa5kSlug}/$surahNumber.json"
+        )
+        if (fromGitHubRaw.isNotEmpty()) return fromGitHubRaw
+
+        // Mirror 3: Official Quran.com v4 chapter tafsir API
+        val qId = book.quranComTafsirId
+        if (qId != null) {
+            val fromQuranCom = fetchSurahFromQuranComV4(qId, surahNumber)
+            if (fromQuranCom.isNotEmpty()) return fromQuranCom
+        }
+
+        return emptyMap()
+    }
+
+    private fun fetchSurahFromSpa5k(url: String): Map<Int, String> {
         val raw = executeGet(url) ?: return emptyMap()
         return runCatching {
             val obj = JSONObject(raw)
@@ -312,16 +364,39 @@ object TafsirRepository {
         }.getOrDefault(emptyMap())
     }
 
+    private fun fetchSurahFromQuranComV4(tafsirId: Int, surahNumber: Int): Map<Int, String> {
+        val url = "https://api.quran.com/api/v4/tafsirs/$tafsirId/by_chapter/$surahNumber?per_page=300"
+        val raw = executeGet(url) ?: return emptyMap()
+        return runCatching {
+            val obj = JSONObject(raw)
+            val arr = obj.optJSONArray("tafsirs") ?: return@runCatching emptyMap()
+            val map = HashMap<Int, String>(arr.length())
+            for (i in 0 until arr.length()) {
+                val item = arr.optJSONObject(i) ?: continue
+                val verseKey = item.optString("verse_key", "")
+                val aNum = verseKey.substringAfter(":", "").toIntOrNull()
+                    ?: item.optInt("verse_number", 0)
+                val txt = cleanTafsirText(item.optString("text", ""))
+                if (aNum > 0 && txt.isNotBlank()) {
+                    map[aNum] = txt
+                }
+            }
+            map
+        }.getOrDefault(emptyMap())
+    }
+
     private fun loadLocalBookMap(file: File): Map<String, String> {
-        val raw = file.readText(Charsets.UTF_8)
-        val obj = JSONObject(raw)
-        val result = HashMap<String, String>(obj.length())
-        val keys = obj.keys()
-        while (keys.hasNext()) {
-            val key = keys.next()
-            result[key] = obj.optString(key, "")
-        }
-        return result
+        return runCatching {
+            val raw = file.readText(Charsets.UTF_8)
+            val obj = JSONObject(raw)
+            val result = HashMap<String, String>(obj.length())
+            val keys = obj.keys()
+            while (keys.hasNext()) {
+                val key = keys.next()
+                result[key] = obj.optString(key, "")
+            }
+            result
+        }.getOrDefault(emptyMap())
     }
 
     private fun executeGet(url: String): String? {

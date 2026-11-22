@@ -386,25 +386,28 @@ object TajweedEngine {
             while (i < n && text[i].isWhitespace()) i++
             if (i >= n) break
             val start = i
-            while (i < n && !text[i].isWhitespace()) i++
-            list.add(start)
-            list.add(i - 1)
+            var hasArabicLetter = false
+            while (i < n && !text[i].isWhitespace()) {
+                val ch = text[i]
+                if ((ch in '\u0621'..'\u064A') || ch == '\u0671' || ch == '\u0670') {
+                    hasArabicLetter = true
+                }
+                i++
+            }
+            // Skip standalone Quranic waqf/pause marks (ۖ ۗ ۚ ۛ ۞ ۩) that Quran.com does not count as spoken words
+            if (hasArabicLetter) {
+                list.add(start)
+                list.add(i - 1)
+            }
         }
         return IntArray(list.size) { list[it] }
     }
 
     fun countWords(text: String): Int {
-        var count = 0
-        var inWord = false
-        for (ch in text) {
-            if (ch.isWhitespace()) {
-                inWord = false
-            } else if (!inWord) {
-                inWord = true
-                count++
-            }
+        val offsets = wordRangeCache.get(text) ?: computeWordOffsets(text).also {
+            wordRangeCache.put(text, it)
         }
-        return count
+        return offsets.size / 2
     }
 
     /**
@@ -436,11 +439,13 @@ object TajweedEngine {
         tajweedEnabled: Boolean,
         isNightMode: Boolean,
         baseTextColor: Color,
-        backgroundColor: Color = Color.Transparent,
+        backgroundColor: Color = Color.Unspecified,
         activeWordIndex: Int? = null,
-        activeWordBackground: Color = Color.Transparent
+        activeWordBackground: Color = Color.Unspecified
     ) {
-        val activeWordRange = if (activeWordIndex != null && activeWordBackground != Color.Transparent) {
+        val resolvedBaseBg = if (backgroundColor == Color.Transparent) Color.Unspecified else backgroundColor
+        val resolvedWordBg = if (activeWordBackground == Color.Transparent) Color.Unspecified else activeWordBackground
+        val activeWordRange = if (activeWordIndex != null && resolvedWordBg != Color.Unspecified) {
             findWordCharRange(text, activeWordIndex)
         } else {
             null
@@ -448,7 +453,7 @@ object TajweedEngine {
         val tajweedSpans = if (tajweedEnabled) detectTajweedSpans(text) else emptyList()
 
         if (tajweedSpans.isEmpty() && activeWordRange == null) {
-            withStyle(SpanStyle(color = baseTextColor, background = backgroundColor)) {
+            withStyle(SpanStyle(color = baseTextColor, background = resolvedBaseBg)) {
                 append(text)
             }
             return
@@ -483,7 +488,7 @@ object TajweedEngine {
             val isInActiveWord = activeWordRange != null &&
                 segStart >= activeWordRange.first &&
                 segEnd <= activeWordRange.last + 1
-            val bgColor = if (isInActiveWord) activeWordBackground else backgroundColor
+            val bgColor = if (isInActiveWord) resolvedWordBg else resolvedBaseBg
 
             withStyle(SpanStyle(color = fgColor, background = bgColor)) {
                 append(text.substring(segStart, segEnd))

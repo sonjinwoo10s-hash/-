@@ -8,13 +8,19 @@ import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.BuildConfig
+import com.example.alarm.AstronomicalPrayerCalculator
 import com.example.alarm.PermissionsHelper
 import com.example.alarm.PrayerAlarmScheduler
+import com.example.alarm.PrayerCalculationMethod
+import com.example.alarm.PrayerLogStats
+import com.example.alarm.PrayerLogStore
 import com.example.alarm.PrayerScheduleStore
+import com.example.alarm.QadaaItem
 import com.example.audio.AdhanAudioPlayer
 import com.example.audio.AudioPlayerState
 import com.example.audio.AyahAudioPlayer
 import com.example.audio.AyahAudioState
+import com.example.audio.EveryAyahMapper
 import com.example.audio.FajrAlarmPlayer
 import com.example.audio.QuranAudioPlayer
 import com.example.audio.QuranPlaybackSpeeds
@@ -24,8 +30,10 @@ import com.example.data.local.MuezzinLibraryData
 import com.example.data.local.OfflineIslamicData
 import com.example.data.local.PersistentOfflineStorage
 import com.example.quran.TajweedEngine
+import com.example.service.AdhanPlaybackService
 import com.example.service.PrayerCountdownService
 import com.example.service.QuranMediaEngine
+import com.example.data.model.AdhanPlaybackStatus
 import com.example.data.model.AdhanPlayerState
 import com.example.data.model.AyahItem
 import com.example.data.model.AyahRepeatMode
@@ -43,6 +51,9 @@ import com.example.data.model.MuezzinItem
 import com.example.data.model.MuezzinRegion
 import com.example.data.model.MushafPaperTheme
 import com.example.data.model.OfflineHadithBookMeta
+import com.example.data.model.PrayerAlertCategory
+import com.example.data.model.PrayerAlertSound
+import com.example.data.model.PrayerAlertsSettings
 import com.example.data.model.PrayerEntry
 import com.example.data.model.PrayerTimesUiState
 import com.example.data.model.QuranBookmark
@@ -53,6 +64,9 @@ import com.example.data.model.TasbihState
 import com.example.data.model.WorshipTask
 import com.example.data.model.ZikrItem
 import com.example.data.remote.IslamicNetworkClient
+import com.example.data.repository.GlobalLocationConfig
+import com.example.data.repository.GlobalLocationRepository
+import com.example.data.repository.GlobalSearchResult
 import com.example.data.repository.MuezzinRepository
 import com.example.data.repository.MushafPageAyah
 import com.example.data.repository.MushafPageData
@@ -60,6 +74,7 @@ import com.example.data.repository.OfflineAdhkarRepository
 import com.example.data.repository.OfflineHadithRepository
 import com.example.data.repository.OfflineMushafBook
 import com.example.data.repository.OfflineQuranRepository
+import com.example.data.repository.PrayerAlertRepository
 import com.example.data.repository.QuranTimingRepository
 import com.example.ui.components.AppUpdateDialogStage
 import com.example.ui.components.AppUpdateUiState
@@ -68,6 +83,7 @@ import com.example.data.repository.ReciterRepository
 import com.example.data.repository.TafsirBook
 import com.example.data.repository.TafsirRepository
 import com.example.sensor.QiblaMath
+import com.example.widget.PrayerTimesWidgetProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -124,7 +140,9 @@ data class QuranUiState(
     val isLoadingOfflineMushaf: Boolean = false,
     val mushafDownloadProgress: String? = null,
     val mushafError: String? = null,
-    val isMushafCachedOffline: Boolean = false
+    val isMushafCachedOffline: Boolean = false,
+    val downloadedSurahAudioKeys: Set<String> = emptySet(),
+    val downloadingSurahAudioKeys: Set<String> = emptySet()
 )
 
 data class TafsirUiState(
@@ -230,7 +248,7 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
     )
 
     val countdownNotificationEnabled: StateFlow<Boolean> = prefs.countdownNotificationEnabledFlow.stateIn(
-        viewModelScope, SharingStarted.WhileSubscribed(5000), true
+        viewModelScope, SharingStarted.WhileSubscribed(5000), false
     )
 
     val adhanSilenceOnVolume: StateFlow<Boolean> = prefs.adhanSilenceOnVolumeFlow.stateIn(
@@ -253,17 +271,46 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
     val ayahAudioState: StateFlow<AyahAudioState> = ayahAudioPlayer.state
     val adhanState: StateFlow<AdhanPlayerState> = adhanPlayer.state
 
-    val defaultMuezzinId: StateFlow<String> = prefs.defaultMuezzinIdFlow.stateIn(
-        viewModelScope, SharingStarted.WhileSubscribed(5000), MuezzinLibraryData.defaultMuezzinId
-    )
+    // Unified real-time Ayah ("surah:ayah") and Word-by-Word (0-based word index) highlight StateFlows
+    // observed directly by the Mushaf UI.
+    val activeVerseKey: StateFlow<String?> = combine(
+        audioPlayer.activeVerseKey,
+        ayahAudioPlayer.state
+    ) { surahVerseKey, ayahSt ->
+        ayahSt.activeVerseKey ?: surahVerseKey
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
-    val fajrMuezzinId: StateFlow<String> = prefs.fajrMuezzinIdFlow.stateIn(
-        viewModelScope, SharingStarted.WhileSubscribed(5000), MuezzinLibraryData.defaultFajrMuezzinId
-    )
+    val activeWordIndex: StateFlow<Int?> = combine(
+        audioPlayer.activeWordIndex,
+        ayahAudioPlayer.state
+    ) { surahWordIdx, ayahSt ->
+        if (ayahSt.isPlaying || ayahSt.isBuffering) ayahSt.activeWordIndex else surahWordIdx
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
-    val useDedicatedFajrAdhan: StateFlow<Boolean> = prefs.useDedicatedFajrAdhanFlow.stateIn(
-        viewModelScope, SharingStarted.WhileSubscribed(5000), true
+    private val _defaultMuezzinId = MutableStateFlow(
+        PrayerScheduleStore.getDefaultMuezzinId(application.applicationContext)
     )
+    val defaultMuezzinId: StateFlow<String> = _defaultMuezzinId.asStateFlow()
+
+    private val _fajrMuezzinId = MutableStateFlow(
+        PrayerScheduleStore.getFajrMuezzinId(application.applicationContext)
+    )
+    val fajrMuezzinId: StateFlow<String> = _fajrMuezzinId.asStateFlow()
+
+    private val _useDedicatedFajrAdhan = MutableStateFlow(
+        PrayerScheduleStore.isUseDedicatedFajr(application.applicationContext)
+    )
+    val useDedicatedFajrAdhan: StateFlow<Boolean> = _useDedicatedFajrAdhan.asStateFlow()
+
+    private val _perPrayerMuezzinEnabled = MutableStateFlow(
+        PrayerScheduleStore.isPerPrayerMuezzinEnabled(application.applicationContext)
+    )
+    val perPrayerMuezzinEnabled: StateFlow<Boolean> = _perPrayerMuezzinEnabled.asStateFlow()
+
+    private val _perPrayerMuezzinIds = MutableStateFlow(
+        PrayerScheduleStore.getPerPrayerMuezzinIds(application.applicationContext)
+    )
+    val perPrayerMuezzinIds: StateFlow<Map<String, String>> = _perPrayerMuezzinIds.asStateFlow()
 
     val favoriteMuezzinIds: StateFlow<Set<String>> = prefs.favoriteMuezzinIdsFlow.stateIn(
         viewModelScope, SharingStarted.WhileSubscribed(5000), setOf(MuezzinLibraryData.defaultMuezzinId)
@@ -301,7 +348,7 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
         val mergedBase = baseCatalog.map { item ->
             val ov = overrides[item.id]
             if (ov != null) {
-                val hasValidLocal = !ov.localFilePath.isNullOrBlank() && File(ov.localFilePath).exists()
+                val hasValidLocal = !ov.localFilePath.isNullOrBlank()
                 val customLabel = when {
                     hasValidLocal -> ov.localFileName ?: "ملف محلي مخصص"
                     !ov.customUrl.isNullOrBlank() -> "رابط MP3 مخصص"
@@ -332,12 +379,39 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
         allMuezzins,
         defaultMuezzinId
     ) { list, id ->
-        list.find { it.id == id }
-            ?: list.firstOrNull { it.hasAudioSource() }
-            ?: list.firstOrNull()
-            ?: MuezzinLibraryData.builtInMuezzins.first()
+        list.find { it.id == id } ?: run {
+            val snap = PrayerScheduleStore.getDefaultMuezzinSnapshot(getApplication())
+            if (snap.muezzinId == id && snap.muezzinName.isNotBlank()) {
+                MuezzinItem(
+                    id = snap.muezzinId,
+                    name = snap.muezzinName,
+                    subtitle = "الأذان الافتراضي المحفوظ",
+                    region = MuezzinRegion.HARAMAIN.name,
+                    primaryUrl = snap.remoteUrl.orEmpty(),
+                    localFilePath = snap.localFilePath
+                )
+            } else {
+                list.firstOrNull { it.hasAudioSource() }
+                    ?: list.firstOrNull()
+                    ?: MuezzinLibraryData.builtInMuezzins.first()
+            }
+        }
     }.stateIn(
-        viewModelScope, SharingStarted.WhileSubscribed(5000), MuezzinLibraryData.builtInMuezzins.first()
+        viewModelScope,
+        SharingStarted.WhileSubscribed(5000),
+        runCatching {
+            PrayerScheduleStore.getDefaultMuezzinSnapshot(application.applicationContext).let { snap ->
+                MuezzinLibraryData.builtInMuezzins.find { it.id == snap.muezzinId }
+                    ?: MuezzinItem(
+                        id = snap.muezzinId,
+                        name = snap.muezzinName,
+                        subtitle = "الأذان الافتراضي المحفوظ",
+                        region = MuezzinRegion.HARAMAIN.name,
+                        primaryUrl = snap.remoteUrl.orEmpty(),
+                        localFilePath = snap.localFilePath
+                    )
+            }
+        }.getOrElse { MuezzinLibraryData.builtInMuezzins.first() }
     )
 
     private val _muezzinLibraryOpen = MutableStateFlow(false)
@@ -346,6 +420,29 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
     // Smart Fajr Alarm UI State
     private val _fajrAlarmSettingsOpen = MutableStateFlow(false)
     val fajrAlarmSettingsOpen: StateFlow<Boolean> = _fajrAlarmSettingsOpen.asStateFlow()
+
+    // Pre-Adhan & Post-Adhan (Iqama) Alerts State (ON by default)
+    private val _prayerAlertsSettingsOpen = MutableStateFlow(false)
+    val prayerAlertsSettingsOpen: StateFlow<Boolean> = _prayerAlertsSettingsOpen.asStateFlow()
+
+    private val _prayerAlertsSettings = MutableStateFlow(
+        runCatching {
+            PrayerScheduleStore.getPrayerAlertsSettings(application.applicationContext)
+        }.getOrDefault(PrayerAlertsSettings())
+    )
+    val prayerAlertsSettings: StateFlow<PrayerAlertsSettings> = _prayerAlertsSettings.asStateFlow()
+
+    private val _alertSoundsCatalog = MutableStateFlow<List<PrayerAlertSound>>(emptyList())
+    val alertSoundsCatalog: StateFlow<List<PrayerAlertSound>> = _alertSoundsCatalog.asStateFlow()
+
+    private val _isSyncingAlertSounds = MutableStateFlow(false)
+    val isSyncingAlertSounds: StateFlow<Boolean> = _isSyncingAlertSounds.asStateFlow()
+
+    private val _cachedAlertSoundIds = MutableStateFlow<Set<String>>(emptySet())
+    val cachedAlertSoundIds: StateFlow<Set<String>> = _cachedAlertSoundIds.asStateFlow()
+
+    private val _downloadingAlertSoundIds = MutableStateFlow<Set<String>>(emptySet())
+    val downloadingAlertSoundIds: StateFlow<Set<String>> = _downloadingAlertSoundIds.asStateFlow()
 
     private val _fajrAlarmRinging = MutableStateFlow(false)
     val fajrAlarmRinging: StateFlow<Boolean> = _fajrAlarmRinging.asStateFlow()
@@ -387,6 +484,77 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
     private val _selectedCity = MutableStateFlow(OfflineIslamicData.cities.first())
     val selectedCity: StateFlow<CityOption> = _selectedCity.asStateFlow()
 
+    // Global Auto-Location, Hijri Offset, Prayer Log, Auto-Silent DND, Friday Al-Kahf
+    private val _globalLocation = MutableStateFlow(
+        runCatching {
+            PrayerScheduleStore.getGlobalLocation(application.applicationContext)
+        }.getOrDefault(GlobalLocationConfig())
+    )
+    val globalLocation: StateFlow<GlobalLocationConfig> = _globalLocation.asStateFlow()
+
+    private val _globalLocationModalOpen = MutableStateFlow(false)
+    val globalLocationModalOpen: StateFlow<Boolean> = _globalLocationModalOpen.asStateFlow()
+
+    private val _showCalculationMethodPickerInModal = MutableStateFlow(false)
+    val showCalculationMethodPickerInModal: StateFlow<Boolean> =
+        _showCalculationMethodPickerInModal.asStateFlow()
+
+    private val _isDetectingLocation = MutableStateFlow(false)
+    val isDetectingLocation: StateFlow<Boolean> = _isDetectingLocation.asStateFlow()
+
+    private val _globalSearchResults = MutableStateFlow<List<GlobalSearchResult>>(emptyList())
+    val globalSearchResults: StateFlow<List<GlobalSearchResult>> = _globalSearchResults.asStateFlow()
+
+    private val _isSearchingLocations = MutableStateFlow(false)
+    val isSearchingLocations: StateFlow<Boolean> = _isSearchingLocations.asStateFlow()
+
+    private val _hijriDayOffset = MutableStateFlow(
+        runCatching {
+            PrayerScheduleStore.getHijriDayOffset(application.applicationContext)
+        }.getOrDefault(0)
+    )
+    val hijriDayOffset: StateFlow<Int> = _hijriDayOffset.asStateFlow()
+
+    private val _prayerLogStats = MutableStateFlow(PrayerLogStats())
+    val prayerLogStats: StateFlow<PrayerLogStats> = _prayerLogStats.asStateFlow()
+
+    private val _prayerTrackerOpen = MutableStateFlow(false)
+    val prayerTrackerOpen: StateFlow<Boolean> = _prayerTrackerOpen.asStateFlow()
+
+    private val _pendingQadaaItems = MutableStateFlow<List<QadaaItem>>(emptyList())
+    val pendingQadaaItems: StateFlow<List<QadaaItem>> = _pendingQadaaItems.asStateFlow()
+
+    private val _prayerLogRevision = MutableStateFlow(0L)
+    val prayerLogRevision: StateFlow<Long> = _prayerLogRevision.asStateFlow()
+
+    private val _autoSilentEnabled = MutableStateFlow(
+        runCatching {
+            PrayerScheduleStore.isAutoSilentEnabled(application.applicationContext)
+        }.getOrDefault(false)
+    )
+    val autoSilentEnabled: StateFlow<Boolean> = _autoSilentEnabled.asStateFlow()
+
+    private val _autoSilentAtIqama = MutableStateFlow(
+        runCatching {
+            PrayerScheduleStore.isAutoSilentAtIqama(application.applicationContext)
+        }.getOrDefault(false)
+    )
+    val autoSilentAtIqama: StateFlow<Boolean> = _autoSilentAtIqama.asStateFlow()
+
+    private val _autoSilentDurationMinutes = MutableStateFlow(
+        runCatching {
+            PrayerScheduleStore.getAutoSilentDurationMinutes(application.applicationContext)
+        }.getOrDefault(15)
+    )
+    val autoSilentDurationMinutes: StateFlow<Int> = _autoSilentDurationMinutes.asStateFlow()
+
+    private val _fridayKahfReminderEnabled = MutableStateFlow(
+        runCatching {
+            PrayerScheduleStore.isFridayKahfReminderEnabled(application.applicationContext)
+        }.getOrDefault(true)
+    )
+    val fridayKahfReminderEnabled: StateFlow<Boolean> = _fridayKahfReminderEnabled.asStateFlow()
+
     private val _prayerState = MutableStateFlow(PrayerTimesUiState())
     val prayerState: StateFlow<PrayerTimesUiState> = _prayerState.asStateFlow()
 
@@ -427,7 +595,13 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
     private var currentTimings24: Map<String, String> = OfflineIslamicData.fallbackTimings24
+    private var selectedDateTimings24: Map<String, String> = OfflineIslamicData.fallbackTimings24
+    private var selectedPrayerDateKey: String = AstronomicalPrayerCalculator.todayDateKey()
+    private var lastObservedPrayerDateKey: String = AstronomicalPrayerCalculator.todayDateKey()
     private var countdownJob: Job? = null
+    private var prayerDateFetchJob: Job? = null
+    private var prayerTrackerRefreshJob: Job? = null
+    private var globalSearchJob: Job? = null
     private var appUpdateDownloadJob: Job? = null
     private var surahListRequested = false
     private var offlineMushafBook: OfflineMushafBook? = null
@@ -435,7 +609,6 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
     private var azkarLoadJob: Job? = null
     private var tafsirFetchJob: Job? = null
     private val activeSurahAudioDownloads = mutableSetOf<String>()
-    private var tafsirStatusesLoaded = false
     private var hadithFavoritesLoaded = false
     private var muezzinCatalogLoaded = false
     private var pendingMushafSurah: Int? = null
@@ -450,105 +623,197 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
     )
 
     init {
-        QuranMediaEngine.ensureInitialized(
-            context = application.applicationContext,
-            resolveSurahName = { num -> resolveSurahName(num) }
-        )
-        // Clean up any leftover update APK & perform silent check (max once per 12h) off main thread
+        runCatching {
+            QuranMediaEngine.ensureInitialized(
+                context = application.applicationContext,
+                resolveSurahName = { num -> resolveSurahName(num) }
+            )
+        }
+        // Defer non-critical GitHub Releases update check until after Home Screen renders smoothly
         viewModelScope.launch {
-            val appCtx = getApplication<Application>().applicationContext
-            AppUpdateManager.cleanupLeftoverUpdateApk(appCtx)
-            if (AppUpdateManager.shouldRunSilentCheck(appCtx)) {
+            delay(2_500L)
+            runCatching {
+                val appCtx = getApplication<Application>().applicationContext
+                withContext(Dispatchers.IO) {
+                    AppUpdateManager.cleanupLeftoverUpdateApk(appCtx)
+                }
                 checkForAppUpdate(manual = false)
             }
         }
+        // Defer non-critical alerts.json cache scan & remote refresh after Home Screen is drawn
         viewModelScope.launch {
-            val savedCityId = prefs.selectedCityIdFlow.first()
-            val city = OfflineIslamicData.cities.find { it.id == savedCityId }
-                ?: OfflineIslamicData.cities.first()
-            _selectedCity.value = city
-            updateQiblaLocation(city.lat, city.lng, city.arabicLabel)
-            fetchPrayerTimes(city, manual = false)
-        }
-        viewModelScope.launch {
-            val doneIds = prefs.getTrackerDoneIds(todayKey())
-            _worshipTasks.value = OfflineIslamicData.worshipTasks.map {
-                it.copy(completed = doneIds.contains(it.id))
+            delay(1_600L)
+            runCatching {
+                val appCtx = getApplication<Application>().applicationContext
+                val cached = PrayerAlertRepository.loadCachedCatalog(appCtx)
+                val cachedIds = withContext(Dispatchers.IO) {
+                    PrayerAlertRepository.getAllCachedAlertIds(appCtx, cached)
+                }
+                _cachedAlertSoundIds.value = cachedIds
+                if (cached.isNotEmpty()) {
+                    _alertSoundsCatalog.value = cached
+                    applyRemoteDefaultAlertSoundsIfNeeded(appCtx, cached)
+                }
+                syncAlertSoundsCatalog(manual = false)
             }
-            refreshFuturePrayerLocks(System.currentTimeMillis())
         }
         viewModelScope.launch {
-            val persistedReciter = prefs.selectedQuranReciterFlow.first()
-            audioPlayer.syncPersistedReciter(persistedReciter)
-            val persistedSpeed = prefs.quranPlaybackSpeedFlow.first()
-            audioPlayer.syncPersistedSpeed(persistedSpeed)
-            ayahAudioPlayer.setPlaybackSpeed(persistedSpeed)
-            val wbwEnabled = prefs.wordByWordHighlightEnabledFlow.first()
-            val btOffset = prefs.syncOffsetBluetoothMsFlow.first()
-            val spkOffset = prefs.syncOffsetSpeakerMsFlow.first()
-            audioPlayer.syncLatencyPreferences(
-                wordByWordEnabled = wbwEnabled,
-                bluetoothOffsetMs = btOffset,
-                speakerOffsetMs = spkOffset
-            )
+            runCatching {
+                val appCtx = getApplication<Application>().applicationContext
+                val locConfig = withContext(Dispatchers.IO) {
+                    if (PrayerScheduleStore.hasSavedGlobalLocation(appCtx)) {
+                        PrayerScheduleStore.getGlobalLocation(appCtx)
+                    } else {
+                        // Migrate legacy city choice cleanly to GlobalLocationConfig
+                        val savedCityId = runCatching { prefs.selectedCityIdFlow.first() }.getOrDefault("cairo")
+                        val city = OfflineIslamicData.cities.find { it.id == savedCityId }
+                            ?: OfflineIslamicData.cities.first()
+                        _selectedCity.value = city
+                        val cc = inferCountryCodeForLegacyCity(city.country)
+                        val migrated = GlobalLocationConfig(
+                            lat = city.lat,
+                            lng = city.lng,
+                            displayLabel = city.arabicLabel,
+                            countryCode = cc,
+                            countryName = city.country,
+                            cityName = city.city,
+                            calculationMethodId = city.method,
+                            isMethodManualOverride = false
+                        )
+                        PrayerScheduleStore.saveGlobalLocation(appCtx, migrated)
+                        migrated
+                    }
+                }
+                _globalLocation.value = locConfig
+                updateQiblaLocation(locConfig.lat, locConfig.lng, locConfig.displayLabel)
+                loadPrayerTimesForLocation(locConfig, selectedPrayerDateKey, manual = false)
+            }
         }
-        // Keep PrayerScheduleStore synchronized with selected Muezzin / Fajr Adhan for background playback
         viewModelScope.launch {
-            combine(
-                activeDefaultMuezzin,
-                activeFajrMuezzin,
-                useDedicatedFajrAdhan
-            ) { defM, fajrM, dedicated ->
-                Triple(defM, fajrM, dedicated)
-            }.collect { (defM, fajrM, dedicated) ->
-                PrayerScheduleStore.saveMuezzinSelection(
-                    context = getApplication(),
-                    defaultMuezzin = defM,
-                    fajrMuezzin = fajrM,
-                    useDedicatedFajr = dedicated
+            runCatching {
+                val appCtx = getApplication<Application>().applicationContext
+                val todayStr = AstronomicalPrayerCalculator.todayDateKey()
+                val doneIds = withContext(Dispatchers.IO) {
+                    val ids = prefs.getTrackerDoneIds(todayStr).toMutableSet()
+                    // Sync today's PrayerLogStore performed prayers into daily worship tasks
+                    val loggedToday = PrayerLogStore.getPerformedPrayers(appCtx, todayStr)
+                    loggedToday.forEach { pKey ->
+                        trackerTaskIdByPrayerKey[pKey]?.let { ids.add(it) }
+                    }
+                    // Also seed PrayerLogStore if user previously checked worship tasks today
+                    val prayerKeysFromTasks = ids.mapNotNull { trackerPrayerKeyByTaskId[it] }.toSet()
+                    if (prayerKeysFromTasks.isNotEmpty() && prayerKeysFromTasks != loggedToday) {
+                        PrayerLogStore.setPerformedPrayers(appCtx, todayStr, loggedToday + prayerKeysFromTasks)
+                    }
+                    ids
+                }
+                _worshipTasks.value = OfflineIslamicData.worshipTasks.map {
+                    it.copy(completed = doneIds.contains(it.id))
+                }
+                refreshFuturePrayerLocks(System.currentTimeMillis())
+                refreshPrayerTrackerState()
+            }
+        }
+        viewModelScope.launch {
+            runCatching {
+                val persistedReciter = prefs.selectedQuranReciterFlow.first()
+                audioPlayer.syncPersistedReciter(persistedReciter)
+                val persistedSpeed = prefs.quranPlaybackSpeedFlow.first()
+                audioPlayer.syncPersistedSpeed(persistedSpeed)
+                ayahAudioPlayer.setPlaybackSpeed(persistedSpeed)
+                val wbwEnabled = prefs.wordByWordHighlightEnabledFlow.first()
+                val btOffset = prefs.syncOffsetBluetoothMsFlow.first()
+                val spkOffset = prefs.syncOffsetSpeakerMsFlow.first()
+                audioPlayer.syncLatencyPreferences(
+                    wordByWordEnabled = wbwEnabled,
+                    bluetoothOffsetMs = btOffset,
+                    speakerOffsetMs = spkOffset
                 )
+            }
+        }
+        // Defer backup restore check, legacy cleanup, cached Muezzin load & widget refresh off Main thread
+        viewModelScope.launch {
+            delay(800L)
+            runCatching {
+                val appCtx = getApplication<Application>().applicationContext
+                withContext(Dispatchers.IO) {
+                    runCatching { PrayerLogStore.ensureRestoredFromBackupFile(appCtx) }
+                    runCatching { OfflineHadithRepository.cleanupLegacyRemovedBooks(appCtx) }
+                    runCatching {
+                        if (MuezzinRepository.hasCatalogCache(appCtx)) {
+                            val cachedMuezzins = MuezzinRepository.loadCachedCatalog(appCtx)
+                            if (cachedMuezzins.isNotEmpty()) {
+                                _repoMuezzins.value = cachedMuezzins
+                                muezzinCatalogLoaded = true
+                            }
+                        }
+                    }
+                }
+                refreshPrayerTrackerState()
+                PrayerTimesWidgetProvider.scheduleDebouncedWidgetUpdate(appCtx, delayMs = 600L)
             }
         }
         // Keep persistent countdown notification service synced with user preference
         viewModelScope.launch {
-            prefs.countdownNotificationEnabledFlow.collect { enabled ->
-                val appCtx = getApplication<Application>().applicationContext
-                PrayerScheduleStore.setCountdownNotificationEnabled(appCtx, enabled)
-                PrayerCountdownService.syncState(appCtx)
+            runCatching {
+                prefs.countdownNotificationEnabledFlow.collect { enabled ->
+                    val appCtx = getApplication<Application>().applicationContext
+                    withContext(Dispatchers.IO) {
+                        runCatching { PrayerScheduleStore.setCountdownNotificationEnabled(appCtx, enabled) }
+                        runCatching { PrayerCountdownService.syncState(appCtx) }
+                    }
+                }
             }
         }
         // Keep Adhan quick-silence toggles synced in PrayerScheduleStore for lock-screen service access
         viewModelScope.launch {
-            prefs.adhanSilenceOnVolumeFlow.collect { enabled ->
-                PrayerScheduleStore.setAdhanSilenceOnVolumeEnabled(
-                    getApplication<Application>().applicationContext,
-                    enabled
-                )
+            runCatching {
+                prefs.adhanSilenceOnVolumeFlow.collect { enabled ->
+                    runCatching {
+                        PrayerScheduleStore.setAdhanSilenceOnVolumeEnabled(
+                            getApplication<Application>().applicationContext,
+                            enabled
+                        )
+                    }
+                }
             }
         }
         viewModelScope.launch {
-            prefs.adhanSilenceOnFlipFlow.collect { enabled ->
-                PrayerScheduleStore.setAdhanSilenceOnFlipEnabled(
-                    getApplication<Application>().applicationContext,
-                    enabled
-                )
+            runCatching {
+                prefs.adhanSilenceOnFlipFlow.collect { enabled ->
+                    runCatching {
+                        PrayerScheduleStore.setAdhanSilenceOnFlipEnabled(
+                            getApplication<Application>().applicationContext,
+                            enabled
+                        )
+                    }
+                }
             }
         }
-        // Lightweight startup check ONLY: read last Mushaf page pref & file existence flag.
-        // Heavy Quran, Tafsir, Hadith, and Muezzin JSON files are NEVER parsed on app startup;
-        // they load strictly on-demand on Dispatchers.IO when the user opens each section.
+        // Deferred lightweight startup check on Dispatchers.IO: read last Mushaf page pref & disk download checkmarks.
         viewModelScope.launch {
-            val appCtx = getApplication<Application>().applicationContext
-            val lastPage = prefs.lastMushafPageFlow.first()
-            val cachedLocally = withContext(Dispatchers.IO) {
-                OfflineQuranRepository.isCachedLocally(appCtx)
-            }
-            _quranState.update {
-                it.copy(
-                    currentMushafPage = lastPage,
-                    lastSavedMushafPage = lastPage,
-                    isMushafCachedOffline = cachedLocally
-                )
+            delay(900L)
+            runCatching {
+                val appCtx = getApplication<Application>().applicationContext
+                val lastPage = runCatching { prefs.lastMushafPageFlow.first() }.getOrDefault(1)
+                val (cachedLocally, downloadedAudioKeys, downloadedTafsirs) = withContext(Dispatchers.IO) {
+                    Triple(
+                        runCatching { OfflineQuranRepository.isCachedLocally(appCtx) }.getOrDefault(false),
+                        runCatching { PersistentOfflineStorage.getDownloadedSurahKeys(appCtx) }.getOrDefault(emptySet()),
+                        runCatching { TafsirRepository.getDownloadedBookIds(appCtx) }.getOrDefault(emptySet())
+                    )
+                }
+                _quranState.update {
+                    it.copy(
+                        currentMushafPage = lastPage,
+                        lastSavedMushafPage = lastPage,
+                        isMushafCachedOffline = cachedLocally,
+                        downloadedSurahAudioKeys = downloadedAudioKeys
+                    )
+                }
+                _tafsirState.update {
+                    it.copy(downloadedBookIds = downloadedTafsirs)
+                }
             }
         }
     }
@@ -720,78 +985,539 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // =========================================================================
-    // MODULE A: HOME — PRAYER TIMES, TRACKER, DAILY INSPIRATION
+    // MODULE A: HOME — GLOBAL LOCATION, DATE NAVIGATION, PRAYER TIMES & LOG
     // =========================================================================
+
+    private val trackerPrayerKeyByTaskId = mapOf(
+        "fajr" to "Fajr",
+        "dhuhr" to "Dhuhr",
+        "asr" to "Asr",
+        "maghrib" to "Maghrib",
+        "isha" to "Isha"
+    )
+
+    private val trackerTaskIdByPrayerKey = mapOf(
+        "Fajr" to "fajr",
+        "Dhuhr" to "dhuhr",
+        "Asr" to "asr",
+        "Maghrib" to "maghrib",
+        "Isha" to "isha"
+    )
+
+    private fun inferCountryCodeForLegacyCity(country: String): String {
+        return when (country.trim().lowercase(Locale.US)) {
+            "egypt" -> "EG"
+            "saudi arabia" -> "SA"
+            "united arab emirates", "uae" -> "AE"
+            "kuwait" -> "KW"
+            "qatar" -> "QA"
+            "jordan" -> "JO"
+            "morocco" -> "MA"
+            "turkey" -> "TR"
+            "united kingdom", "uk" -> "GB"
+            "united states", "usa" -> "US"
+            else -> "EG"
+        }
+    }
 
     fun selectCity(city: CityOption) {
         _selectedCity.value = city
         viewModelScope.launch { prefs.setSelectedCityId(city.id) }
-        updateQiblaLocation(city.lat, city.lng, city.arabicLabel)
-        fetchPrayerTimes(city, manual = true)
+        val appCtx = getApplication<Application>().applicationContext
+        val cc = inferCountryCodeForLegacyCity(city.country)
+        val config = GlobalLocationConfig(
+            lat = city.lat,
+            lng = city.lng,
+            displayLabel = city.arabicLabel,
+            countryCode = cc,
+            countryName = city.country,
+            cityName = city.city,
+            calculationMethodId = city.method,
+            isMethodManualOverride = false
+        )
+        applyNewGlobalLocation(config, showToast = true)
+    }
+
+    fun openGlobalLocationModal(includeMethodOverride: Boolean = false) {
+        _showCalculationMethodPickerInModal.value = includeMethodOverride
+        _globalSearchResults.value = emptyList()
+        _globalLocationModalOpen.value = true
+    }
+
+    fun closeGlobalLocationModal() {
+        globalSearchJob?.cancel()
+        _globalLocationModalOpen.value = false
+    }
+
+    fun searchGlobalLocations(query: String) {
+        globalSearchJob?.cancel()
+        val trimmed = query.trim()
+        if (trimmed.length < 2) {
+            _globalSearchResults.value = emptyList()
+            _isSearchingLocations.value = false
+            return
+        }
+        globalSearchJob = viewModelScope.launch {
+            _isSearchingLocations.value = true
+            val appCtx = getApplication<Application>().applicationContext
+            val results = GlobalLocationRepository.searchLocationsGlobally(appCtx, trimmed)
+            _globalSearchResults.value = results
+            _isSearchingLocations.value = false
+        }
+    }
+
+    fun selectGlobalSearchResult(result: GlobalSearchResult) {
+        val current = _globalLocation.value
+        val method = if (current.isMethodManualOverride) {
+            current.resolvedMethod()
+        } else {
+            PrayerCalculationMethod.forCountryCode(result.countryCode)
+        }
+        val nextConfig = GlobalLocationConfig(
+            lat = result.lat,
+            lng = result.lng,
+            displayLabel = result.displayLabel,
+            countryCode = result.countryCode,
+            countryName = result.countryName,
+            cityName = result.cityName,
+            calculationMethodId = method.alAdhanMethodId,
+            isMethodManualOverride = current.isMethodManualOverride
+        )
+        _globalLocationModalOpen.value = false
+        applyNewGlobalLocation(nextConfig, showToast = true)
+    }
+
+    fun onGlobalGpsDetected(location: Location) {
+        if (_isDetectingLocation.value) return
+        viewModelScope.launch {
+            _isDetectingLocation.value = true
+            val appCtx = getApplication<Application>().applicationContext
+            val preserveManual = _globalLocation.value
+                .takeIf { it.isMethodManualOverride }
+                ?.calculationMethodId
+            val resolved = GlobalLocationRepository.reverseGeocode(
+                context = appCtx,
+                lat = location.latitude,
+                lng = location.longitude,
+                preserveManualMethodId = preserveManual
+            )
+            _isDetectingLocation.value = false
+            _globalLocationModalOpen.value = false
+            applyNewGlobalLocation(resolved, showToast = true)
+        }
+    }
+
+    fun setManualCalculationMethod(method: PrayerCalculationMethod?) {
+        val current = _globalLocation.value
+        val nextConfig = if (method == null) {
+            val auto = PrayerCalculationMethod.forCountryCode(current.countryCode)
+            current.copy(
+                calculationMethodId = auto.alAdhanMethodId,
+                isMethodManualOverride = false
+            )
+        } else {
+            current.copy(
+                calculationMethodId = method.alAdhanMethodId,
+                isMethodManualOverride = true
+            )
+        }
+        applyNewGlobalLocation(nextConfig, showToast = false)
+        val label = if (method == null) {
+            "تم ضبط طريقة الحساب تلقائياً (${nextConfig.resolvedMethod().shortArabicName})"
+        } else {
+            "تم تغيير طريقة الحساب إلى: ${method.shortArabicName}"
+        }
+        emitToast(label)
+    }
+
+    private fun applyNewGlobalLocation(config: GlobalLocationConfig, showToast: Boolean) {
+        val appCtx = getApplication<Application>().applicationContext
+        _globalLocation.value = config
+        PrayerScheduleStore.saveGlobalLocation(appCtx, config)
+        updateQiblaLocation(config.lat, config.lng, config.displayLabel)
+        loadPrayerTimesForLocation(config, selectedPrayerDateKey, manual = false)
+        if (showToast) {
+            emitToast("تم تحديث الموقع: ${config.displayLabel} (${config.resolvedMethod().shortArabicName})")
+        }
+    }
+
+    fun setHijriDayOffset(offsetDays: Int) {
+        val clamped = offsetDays.coerceIn(-2, 2)
+        val appCtx = getApplication<Application>().applicationContext
+        _hijriDayOffset.value = clamped
+        PrayerScheduleStore.setHijriDayOffset(appCtx, clamped)
+
+        val cal = AstronomicalPrayerCalculator.parseDateKey(selectedPrayerDateKey)
+        val adjustedHijri = PrayerScheduleStore.computeAdjustedHijriInfo(cal.timeInMillis, clamped)
+        _prayerState.update {
+            it.copy(
+                hijriDate = adjustedHijri.formattedDate,
+                blessedDayBadge = adjustedHijri.blessedDayBadge
+            )
+        }
+        if (selectedPrayerDateKey == AstronomicalPrayerCalculator.todayDateKey()) {
+            PrayerScheduleStore.saveDisplayMetadata(
+                appCtx,
+                adjustedHijri.formattedDate,
+                _globalLocation.value.displayLabel
+            )
+        }
+        PrayerTimesWidgetProvider.scheduleDebouncedWidgetUpdate(appCtx)
+        val label = when {
+            clamped > 0 -> "+$clamped يوم"
+            clamped < 0 -> "$clamped يوم"
+            else -> "تلقائي (0)"
+        }
+        emitToast("تم تعديل التاريخ الهجري: $label")
+    }
+
+    fun setAutoSilentEnabled(enabled: Boolean) {
+        val appCtx = getApplication<Application>().applicationContext
+        if (enabled && !PrayerScheduleStore.isDndPermissionGranted(appCtx)) {
+            emitToast("يرجى منح إذن عدم الإزعاج لتفعيل الوضع الصامت وقت الصلاة")
+            return
+        }
+        _autoSilentEnabled.value = enabled
+        PrayerScheduleStore.setAutoSilentEnabled(appCtx, enabled)
+        PrayerAlarmScheduler.scheduleAllPrayers(appCtx)
+        emitToast(
+            if (enabled) "تم تفعيل الوضع الصامت التلقائي وقت الصلاة"
+            else "تم إيقاف الوضع الصامت وقت الصلاة"
+        )
+    }
+
+    fun setAutoSilentAtIqama(atIqama: Boolean) {
+        val appCtx = getApplication<Application>().applicationContext
+        _autoSilentAtIqama.value = atIqama
+        PrayerScheduleStore.setAutoSilentAtIqama(appCtx, atIqama)
+        PrayerAlarmScheduler.scheduleAllPrayers(appCtx)
+        emitToast(
+            if (atIqama) "سيتم تفعيل الصامت تلقائياً عند الإقامة"
+            else "سيتم تفعيل الصامت تلقائياً عند الأذان"
+        )
+    }
+
+    fun setAutoSilentDurationMinutes(minutes: Int) {
+        val clamped = minutes.coerceIn(5, 60)
+        val appCtx = getApplication<Application>().applicationContext
+        _autoSilentDurationMinutes.value = clamped
+        PrayerScheduleStore.setAutoSilentDurationMinutes(appCtx, clamped)
+        PrayerAlarmScheduler.scheduleAllPrayers(appCtx)
+        emitToast("مدة الوضع الصامت: $clamped دقيقة")
+    }
+
+    fun setFridayKahfReminderEnabled(enabled: Boolean) {
+        val appCtx = getApplication<Application>().applicationContext
+        _fridayKahfReminderEnabled.value = enabled
+        PrayerScheduleStore.setFridayKahfReminderEnabled(appCtx, enabled)
+        PrayerAlarmScheduler.scheduleAllPrayers(appCtx)
+        emitToast(
+            if (enabled) "تم تفعيل تذكير سورة الكهف كل جمعة الساعة 9:00 صباحاً"
+            else "تم إيقاف تذكير سورة الكهف يوم الجمعة"
+        )
     }
 
     fun refreshPrayerTimes() {
-        fetchPrayerTimes(_selectedCity.value, manual = true)
+        loadPrayerTimesForLocation(_globalLocation.value, selectedPrayerDateKey, manual = true)
     }
 
-    private fun fetchPrayerTimes(city: CityOption, manual: Boolean) {
-        viewModelScope.launch {
-            val gregStr = formatGregorianArabic()
-            _prayerState.update {
-                it.copy(
-                    isLoading = true,
-                    gregorianDate = gregStr,
-                    statusNote = "جاري تحديث مواقيت ${city.arabicLabel}..."
+    fun navigatePrayerDateByDays(deltaDays: Int) {
+        val cal = AstronomicalPrayerCalculator.parseDateKey(selectedPrayerDateKey)
+        cal.add(Calendar.DAY_OF_YEAR, deltaDays)
+        val nextKey = AstronomicalPrayerCalculator.dateKey(cal)
+        selectedPrayerDateKey = nextKey
+        loadPrayerTimesForLocation(_globalLocation.value, nextKey, manual = false)
+    }
+
+    fun selectPrayerDate(year: Int, monthZeroBased: Int, dayOfMonth: Int) {
+        val cal = Calendar.getInstance().apply {
+            set(Calendar.YEAR, year)
+            set(Calendar.MONTH, monthZeroBased.coerceIn(0, 11))
+            set(Calendar.DAY_OF_MONTH, dayOfMonth.coerceIn(1, 31))
+            set(Calendar.HOUR_OF_DAY, 12)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }
+        val nextKey = AstronomicalPrayerCalculator.dateKey(cal)
+        selectedPrayerDateKey = nextKey
+        loadPrayerTimesForLocation(_globalLocation.value, nextKey, manual = false)
+    }
+
+    fun returnToTodayPrayerDate() {
+        val today = AstronomicalPrayerCalculator.todayDateKey()
+        if (selectedPrayerDateKey == today) return
+        selectedPrayerDateKey = today
+        loadPrayerTimesForLocation(_globalLocation.value, today, manual = false)
+    }
+
+    private fun refreshPrayerTrackerState() {
+        _prayerLogRevision.update { it + 1L }
+        prayerTrackerRefreshJob?.cancel()
+        prayerTrackerRefreshJob = viewModelScope.launch {
+            val appCtx = getApplication<Application>().applicationContext
+            val (stats, qadaa) = withContext(Dispatchers.IO) {
+                val computedStats = runCatching { PrayerLogStore.computeStats(appCtx) }
+                    .getOrDefault(_prayerLogStats.value)
+                val computedQadaa = runCatching { PrayerLogStore.getPendingQadaaItems(appCtx) }
+                    .getOrDefault(_pendingQadaaItems.value)
+                computedStats to computedQadaa
+            }
+            _prayerLogStats.value = stats
+            _pendingQadaaItems.value = qadaa
+        }
+    }
+
+    fun openPrayerTracker() {
+        refreshPrayerTrackerState()
+        _prayerTrackerOpen.value = true
+    }
+
+    fun closePrayerTracker() {
+        _prayerTrackerOpen.value = false
+    }
+
+    fun togglePrayerPerformed(prayerKey: String) {
+        togglePrayerPerformedForDate(selectedPrayerDateKey, prayerKey)
+    }
+
+    fun togglePrayerPerformedForDate(dateKey: String, prayerKey: String) {
+        val today = AstronomicalPrayerCalculator.todayDateKey()
+        if (dateKey > today) return
+        val appCtx = getApplication<Application>().applicationContext
+        val updatedSet = PrayerLogStore.togglePrayer(appCtx, dateKey, prayerKey)
+        refreshPrayerTrackerState()
+
+        // Keep Today's Worship Tracker synchronized when marking today's prayers
+        if (dateKey == today) {
+            val taskId = trackerTaskIdByPrayerKey[prayerKey]
+            if (taskId != null) {
+                val isDone = updatedSet.contains(prayerKey)
+                val nextTasks = _worshipTasks.value.map { task ->
+                    if (task.id == taskId) task.copy(completed = isDone) else task
+                }
+                _worshipTasks.value = nextTasks
+                val doneIds = nextTasks.filter { it.completed }.map { it.id }.toSet()
+                viewModelScope.launch { prefs.saveTrackerDoneIds(today, doneIds) }
+            }
+        }
+        if (dateKey == selectedPrayerDateKey) {
+            updatePrayerCountdownOnce()
+        }
+    }
+
+    fun markQadaaDone(dateKey: String, prayerKey: String) {
+        val appCtx = getApplication<Application>().applicationContext
+        PrayerLogStore.markQadaaCompleted(appCtx, dateKey, prayerKey)
+        refreshPrayerTrackerState()
+        if (dateKey == selectedPrayerDateKey) {
+            updatePrayerCountdownOnce()
+        }
+        emitToast("تقبل الله منك — تم تسجيل قضاء الصلاة ✓")
+    }
+
+    fun toggleSunnahHabitForDate(dateKey: String, habitKey: String) {
+        val appCtx = getApplication<Application>().applicationContext
+        PrayerLogStore.toggleSunnahHabit(appCtx, dateKey, habitKey)
+        _prayerLogRevision.update { it + 1L }
+    }
+
+    fun exportPrayerBackupJson(): String {
+        return PrayerLogStore.exportBackupJson(getApplication<Application>().applicationContext)
+    }
+
+    fun importPrayerBackupJson(rawJson: String) {
+        val appCtx = getApplication<Application>().applicationContext
+        val result = PrayerLogStore.importBackupJson(appCtx, rawJson)
+        if (result.success) {
+            refreshPrayerTrackerState()
+            // Sync today's Home card & worship tracker
+            val today = AstronomicalPrayerCalculator.todayDateKey()
+            val todayLogged = PrayerLogStore.getPerformedPrayers(appCtx, today)
+            val nextTasks = _worshipTasks.value.map { task ->
+                val pKey = trackerPrayerKeyByTaskId[task.id]
+                if (pKey != null) task.copy(completed = todayLogged.contains(pKey)) else task
+            }
+            _worshipTasks.value = nextTasks
+            updatePrayerCountdownOnce()
+            emitToast("تم استيراد السجل بنجاح (${result.importedDaysCount} يوم محفوظ) ✓")
+        } else {
+            emitToast(result.errorMessage ?: "تعذّر استيراد النسخة الاحتياطية")
+        }
+    }
+
+    private fun loadPrayerTimesForLocation(
+        location: GlobalLocationConfig,
+        dateKey: String,
+        manual: Boolean
+    ) {
+        prayerDateFetchJob?.cancel()
+        prayerDateFetchJob = viewModelScope.launch {
+            val appCtx = getApplication<Application>().applicationContext
+            val todayStr = AstronomicalPrayerCalculator.todayDateKey()
+            val isToday = dateKey == todayStr
+            val isFuture = dateKey > todayStr
+            val isPast = dateKey < todayStr
+
+            val targetCal = AstronomicalPrayerCalculator.parseDateKey(dateKey)
+            val nextDayCal = (targetCal.clone() as Calendar).apply { add(Calendar.DAY_OF_YEAR, 1) }
+            val gregStr = AstronomicalPrayerCalculator.formatGregorianArabic(targetCal)
+            val method = location.resolvedMethod()
+            val hijriOffset = _hijriDayOffset.value
+            val hijriInfo = PrayerScheduleStore.computeAdjustedHijriInfo(targetCal.timeInMillis, hijriOffset)
+
+            // 1. Instant 100% offline astronomical calculation (works worldwide with zero latency!)
+            val offlineTargetTimings = AstronomicalPrayerCalculator.calculateTimings24(
+                latitude = location.lat,
+                longitude = location.lng,
+                dateCalendar = targetCal,
+                method = method
+            )
+            val offlineNextDayTimings = AstronomicalPrayerCalculator.calculateTimings24(
+                latitude = location.lat,
+                longitude = location.lng,
+                dateCalendar = nextDayCal,
+                method = method
+            )
+            val offlineTodayTimings = if (isToday) {
+                offlineTargetTimings
+            } else {
+                AstronomicalPrayerCalculator.calculateTimings24(
+                    latitude = location.lat,
+                    longitude = location.lng,
+                    dateCalendar = Calendar.getInstance(),
+                    method = method
                 )
             }
 
+            selectedDateTimings24 = offlineTargetTimings
+            if (isToday || currentTimings24 === OfflineIslamicData.fallbackTimings24) {
+                currentTimings24 = offlineTodayTimings
+            }
+
+            val performedForDate = if (isFuture) {
+                emptySet()
+            } else {
+                PrayerLogStore.getPerformedPrayers(appCtx, dateKey)
+            }
+
+            val offlineNightTimes = PrayerScheduleStore.computeIslamicNightTimes(
+                todayMaghrib24 = offlineTargetTimings["Maghrib"] ?: "17:02",
+                tomorrowFajr24 = offlineNextDayTimings["Fajr"] ?: "04:55",
+                nowMillis = targetCal.timeInMillis
+            )
+
+            _prayerState.update {
+                it.copy(
+                    isLoading = manual,
+                    isOfflineFallback = false,
+                    selectedDateKey = dateKey,
+                    isSelectedDateToday = isToday,
+                    isSelectedDateFuture = isFuture,
+                    isSelectedDatePast = isPast,
+                    hijriDate = hijriInfo.formattedDate,
+                    gregorianDate = gregStr,
+                    blessedDayBadge = hijriInfo.blessedDayBadge,
+                    performedCount = performedForDate.size,
+                    statusNote = "${location.displayLabel} • ${method.shortArabicName}",
+                    islamicMidnightFormatted = offlineNightTimes.islamicMidnightFormatted,
+                    lastThirdNightFormatted = offlineNightTimes.lastThirdNightFormatted
+                )
+            }
+            updatePrayerCountdownOnce()
+
+            // Save today's baseline schedules asynchronously so alarms/widgets stay accurate without blocking UI
+            if (isToday) {
+                lastObservedPrayerDateKey = todayStr
+                withContext(Dispatchers.IO) {
+                    runCatching { PrayerScheduleStore.saveTimings(appCtx, currentTimings24) }
+                    runCatching { PrayerScheduleStore.saveDisplayMetadata(appCtx, hijriInfo.formattedDate, location.displayLabel) }
+                    runCatching { PrayerAlarmScheduler.scheduleAllPrayers(appCtx) }
+                    runCatching { PrayerCountdownService.syncState(appCtx) }
+                }
+                PrayerTimesWidgetProvider.scheduleDebouncedWidgetUpdate(appCtx)
+            }
+            refreshFuturePrayerLocks(System.currentTimeMillis())
+            startPrayerCountdownLoop()
+
+            // 2. Quietly refine via AlAdhan coordinate API when online (deferred briefly on startup so UI paints smoothly)
+            if (!manual) delay(500L)
             try {
+                val dateParam = AstronomicalPrayerCalculator.formatAlAdhanDateParam(targetCal)
                 val response = withContext(Dispatchers.IO) {
-                    IslamicNetworkClient.alAdhanApi.getTimingsByCity(
-                        city = city.city,
-                        country = city.country,
-                        method = city.method
+                    IslamicNetworkClient.alAdhanApi.getTimingsByCoordinates(
+                        date = dateParam,
+                        latitude = location.lat,
+                        longitude = location.lng,
+                        method = method.alAdhanMethodId
                     )
                 }
                 val t = response.data.timings
-                currentTimings24 = mapOf(
+                val apiTimings = mapOf(
                     "Fajr" to cleanTime(t.Fajr),
                     "Dhuhr" to cleanTime(t.Dhuhr),
                     "Asr" to cleanTime(t.Asr),
                     "Maghrib" to cleanTime(t.Maghrib),
                     "Isha" to cleanTime(t.Isha)
                 )
+                if (selectedPrayerDateKey == dateKey) {
+                    selectedDateTimings24 = apiTimings
+                }
+                if (isToday) {
+                    currentTimings24 = apiTimings
+                }
+
                 val h = response.data.date.hijri
-                val hijriText = "${h.weekday.ar}، ${h.day} ${h.month.ar} ${h.year} هـ"
-                _prayerState.update {
-                    it.copy(
-                        isLoading = false,
-                        isOfflineFallback = false,
-                        hijriDate = hijriText,
-                        gregorianDate = gregStr,
-                        statusNote = "مواقيت ${city.arabicLabel} (محدّثة الآن)"
-                    )
+                val finalHijriText = if (hijriOffset != 0) {
+                    hijriInfo.formattedDate
+                } else {
+                    "${h.weekday.ar}، ${h.day} ${h.month.ar} ${h.year} هـ"
+                }
+
+                val nightTimes = PrayerScheduleStore.computeIslamicNightTimes(
+                    todayMaghrib24 = apiTimings["Maghrib"] ?: "17:02",
+                    tomorrowFajr24 = offlineNextDayTimings["Fajr"] ?: apiTimings["Fajr"] ?: "04:55",
+                    nowMillis = targetCal.timeInMillis
+                )
+
+                if (selectedPrayerDateKey == dateKey) {
+                    _prayerState.update {
+                        it.copy(
+                            isLoading = false,
+                            isOfflineFallback = false,
+                            hijriDate = finalHijriText,
+                            gregorianDate = gregStr,
+                            blessedDayBadge = hijriInfo.blessedDayBadge,
+                            statusNote = "${location.displayLabel} • ${method.shortArabicName}",
+                            islamicMidnightFormatted = nightTimes.islamicMidnightFormatted,
+                            lastThirdNightFormatted = nightTimes.lastThirdNightFormatted
+                        )
+                    }
+                    updatePrayerCountdownOnce()
+                }
+
+                if (isToday) {
+                    withContext(Dispatchers.IO) {
+                        runCatching { PrayerScheduleStore.saveTimings(appCtx, currentTimings24) }
+                        runCatching { PrayerScheduleStore.saveDisplayMetadata(appCtx, finalHijriText, location.displayLabel) }
+                        runCatching { PrayerAlarmScheduler.scheduleAllPrayers(appCtx) }
+                        runCatching { PrayerCountdownService.syncState(appCtx) }
+                    }
+                    PrayerTimesWidgetProvider.scheduleDebouncedWidgetUpdate(appCtx)
                 }
                 if (manual) emitToast("تم تحديث مواقيت الصلاة")
             } catch (_: Exception) {
-                currentTimings24 = OfflineIslamicData.fallbackTimings24
-                _prayerState.update {
-                    it.copy(
-                        isLoading = false,
-                        isOfflineFallback = true,
-                        hijriDate = "التقويم الهجري (وضع عدم الاتصال)",
-                        gregorianDate = gregStr,
-                        statusNote = "وضع عدم الاتصال (مواقيت تقريبية)"
-                    )
+                if (selectedPrayerDateKey == dateKey) {
+                    _prayerState.update {
+                        it.copy(
+                            isLoading = false,
+                            isOfflineFallback = true,
+                            statusNote = "${location.displayLabel} • حساب فلكي أوفلاين (${method.shortArabicName})"
+                        )
+                    }
                 }
-                if (manual) emitToast("تعذّر الاتصال، تم استخدام المواقيت التقريبية")
+                if (manual) emitToast("تم حساب المواقيت فلكياً بدون إنترنت")
             }
-            val appCtx = getApplication<Application>().applicationContext
-            PrayerScheduleStore.saveTimings(appCtx, currentTimings24)
-            PrayerAlarmScheduler.scheduleAllPrayers(appCtx)
-            PrayerCountdownService.syncState(appCtx)
-            refreshFuturePrayerLocks(System.currentTimeMillis())
-            startPrayerCountdownLoop()
         }
     }
 
@@ -807,6 +1533,18 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun updatePrayerCountdownOnce() {
         val now = Calendar.getInstance()
+        val currentDateKey = AstronomicalPrayerCalculator.todayDateKey()
+        if (currentDateKey != lastObservedPrayerDateKey) {
+            val wasOnOldToday = selectedPrayerDateKey == lastObservedPrayerDateKey
+            lastObservedPrayerDateKey = currentDateKey
+            if (wasOnOldToday) {
+                selectedPrayerDateKey = currentDateKey
+            }
+            loadPrayerTimesForLocation(_globalLocation.value, selectedPrayerDateKey, manual = false)
+            return
+        }
+
+        // Next prayer & live countdown ALWAYS reflect TODAY's timings
         var nextKey: String? = null
         var nextArabic = "الفجر"
         var targetCal: Calendar? = null
@@ -852,22 +1590,56 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
         val secs = diffSec % 60
         val countdown = String.format(Locale.US, "%02d:%02d:%02d", hrs, mins, secs)
 
+        val appCtx = getApplication<Application>().applicationContext
+        val isToday = selectedPrayerDateKey == currentDateKey
+        val isFuture = selectedPrayerDateKey > currentDateKey
+        val isPast = selectedPrayerDateKey < currentDateKey
+        val displayTimings = if (isToday) currentTimings24 else selectedDateTimings24
+        val performedForSelected = if (isFuture) {
+            emptySet()
+        } else {
+            PrayerLogStore.getPerformedPrayers(appCtx, selectedPrayerDateKey)
+        }
+
         val entries = prayerMeta.map { (key, arName) ->
-            val raw = currentTimings24[key] ?: "--:--"
+            val raw = displayTimings[key] ?: "--:--"
             PrayerEntry(
                 key = key,
                 arabicName = arName,
                 time24 = raw,
                 formatted12 = format12HourArabic(raw),
-                isNext = key == nextKey
+                isNext = isToday && key == nextKey,
+                isPerformed = performedForSelected.contains(key)
             )
         }
 
-        _prayerState.update {
-            it.copy(
+        val activeIqama = PrayerScheduleStore.computeActiveIqamaCountdown(
+            settings = _prayerAlertsSettings.value,
+            timings24 = currentTimings24,
+            nowMillis = now.timeInMillis
+        )
+
+        _prayerState.update { state ->
+            val updatedNight = if (isToday) {
+                PrayerScheduleStore.computeIslamicNightTimes(
+                    todayMaghrib24 = currentTimings24["Maghrib"] ?: "17:02",
+                    tomorrowFajr24 = currentTimings24["Fajr"] ?: "04:55",
+                    nowMillis = now.timeInMillis
+                )
+            } else null
+
+            state.copy(
                 prayers = entries,
                 nextPrayerName = nextArabic,
-                countdownText = countdown
+                countdownText = countdown,
+                selectedDateKey = selectedPrayerDateKey,
+                isSelectedDateToday = isToday,
+                isSelectedDateFuture = isFuture,
+                isSelectedDatePast = isPast,
+                performedCount = performedForSelected.size,
+                islamicMidnightFormatted = updatedNight?.islamicMidnightFormatted ?: state.islamicMidnightFormatted,
+                lastThirdNightFormatted = updatedNight?.lastThirdNightFormatted ?: state.lastThirdNightFormatted,
+                activeIqamaCountdown = activeIqama
             )
         }
 
@@ -877,8 +1649,7 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
         // Check Smart Fajr Alarm auto-trigger when enabled
         val alarmCfg = fajrAlarmSettings.value
         if (alarmCfg.enabled && !_fajrAlarmRinging.value) {
-            val today = todayKey()
-            if (lastAutoTriggeredAlarmDate != today) {
+            if (lastAutoTriggeredAlarmDate != currentDateKey) {
                 val fajr24 = currentTimings24["Fajr"] ?: "04:55"
                 val wakeup24 = FajrTimeCalculator.calculateWakeupTime(fajr24, alarmCfg.offsetMinutesBeforeFajr).time24
                 val nowHHmm = String.format(
@@ -888,20 +1659,12 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
                     now.get(Calendar.MINUTE)
                 )
                 if (nowHHmm == wakeup24) {
-                    lastAutoTriggeredAlarmDate = today
+                    lastAutoTriggeredAlarmDate = currentDateKey
                     triggerFajrAlarmNow(isTest = false)
                 }
             }
         }
     }
-
-    private val trackerPrayerKeyByTaskId = mapOf(
-        "fajr" to "Fajr",
-        "dhuhr" to "Dhuhr",
-        "asr" to "Asr",
-        "maghrib" to "Maghrib",
-        "isha" to "Isha"
-    )
 
     private fun isPrayerStillInFuture(taskId: String, nowMillis: Long): Boolean {
         val prayerKey = trackerPrayerKeyByTaskId[taskId] ?: return false
@@ -939,8 +1702,20 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
         }
         _worshipTasks.value = updated
         val doneIds = updated.filter { it.completed }.map { it.id }.toSet()
+        val today = AstronomicalPrayerCalculator.todayDateKey()
         viewModelScope.launch {
-            prefs.saveTrackerDoneIds(todayKey(), doneIds)
+            prefs.saveTrackerDoneIds(today, doneIds)
+        }
+        // Keep PrayerLogStore synchronized for today's 5 prayers
+        val prayerKey = trackerPrayerKeyByTaskId[taskId]
+        if (prayerKey != null) {
+            val appCtx = getApplication<Application>().applicationContext
+            val currentLogged = PrayerLogStore.getPerformedPrayers(appCtx, today).toMutableSet()
+            val nowDone = updated.find { it.id == taskId }?.completed == true
+            if (nowDone) currentLogged.add(prayerKey) else currentLogged.remove(prayerKey)
+            PrayerLogStore.setPerformedPrayers(appCtx, today, currentLogged)
+            _prayerLogStats.value = PrayerLogStore.computeStats(appCtx)
+            updatePrayerCountdownOnce()
         }
         if (doneIds.size == updated.size && updated.find { it.id == taskId }?.completed == true) {
             emitToast("ما شاء الله! أتممت وردك اليومي بالكامل")
@@ -949,13 +1724,18 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
 
     fun resetTodayTracker() {
         val nowMillis = System.currentTimeMillis()
+        val today = AstronomicalPrayerCalculator.todayDateKey()
+        val appCtx = getApplication<Application>().applicationContext
         _worshipTasks.value = OfflineIslamicData.worshipTasks.map {
             it.copy(
                 completed = false,
                 isLockedFuture = isPrayerStillInFuture(it.id, nowMillis)
             )
         }
-        viewModelScope.launch { prefs.saveTrackerDoneIds(todayKey(), emptySet()) }
+        PrayerLogStore.setPerformedPrayers(appCtx, today, emptySet())
+        _prayerLogStats.value = PrayerLogStore.computeStats(appCtx)
+        viewModelScope.launch { prefs.saveTrackerDoneIds(today, emptySet()) }
+        updatePrayerCountdownOnce()
         emitToast("تم تصفير ورد اليوم")
     }
 
@@ -1261,38 +2041,37 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * Mode 1: "استماع لهذه الآية فقط" (Play This Ayah Only)
-     * Uses official Quran.com v4 millisecond timestamps on the single seamless Surah MP3
-     * whenever the reciter supports them, stopping cleanly at `timestamp_to` (or repeating).
-     * Smart fallback: for mp3quran.net reciters without official timestamps, plays full Surah cleanly
-     * with highlighting disabled so there is never inaccurate highlighting.
+     * - When Quran.com v4/QDC official millisecond timestamps are available: plays ONLY this Ayah
+     *   within the seamless Surah MP3 (`playSingleAyahOnly = true`, `stopAtMs = ayah.endMs`) and
+     *   pauses immediately when finished (or repeats if repeat mode is enabled).
+     * - When timestamps are NOT available (e.g., mp3quran.net reciter or API fallback): NEVER plays
+     *   the full-Surah MP3; instead plays the direct per-Ayah audio URL (EveryAyah / AlQuran.cloud),
+     *   highlights that exact Ayah while playing, and stops automatically on completion.
      */
     fun playSinglePageAyahOnly(pageAyah: MushafPageAyah) {
-        stopOtherAudio(except = AudioSource.SURAH)
         if (audioPlayer.hasOfficialTimestampsSupportForCurrentReciter()) {
+            stopOtherAudio(except = AudioSource.SURAH)
             audioPlayer.playSurahFromAyah(
                 surahNumber = pageAyah.surahNumber,
                 surahName = pageAyah.surahName,
                 startAyahNumber = pageAyah.numberInSurah,
                 singleAyahOnly = true,
-                repeatMode = ayahAudioState.value.repeatMode
+                repeatMode = ayahAudioState.value.repeatMode,
+                onSingleAyahFallbackRequired = {
+                    playSingleAyahDirectPerVerse(pageAyah, continueReading = false)
+                }
             )
         } else {
-            audioPlayer.playSurah(
-                surahNumber = pageAyah.surahNumber,
-                surahName = pageAyah.surahName,
-                forceRestart = true
-            )
-            emitToast("جاري تشغيل ${pageAyah.surahName} كاملة بصوت ${audioState.value.selectedReciter.arabicName}")
+            playSingleAyahDirectPerVerse(pageAyah, continueReading = false)
         }
     }
 
     /**
      * Mode 2: "استماع من هذه الآية" (Continue From Here)
-     * Starts continuous seamless recitation from the exact millisecond `timestamp_from` of the selected Ayah
+     * Starts continuous recitation from the selected Ayah (`playSingleAyahOnly = false`, `stopAtMs = null`)
      * and automatically advances through following Ayahs, Mushaf pages, and the next Surah.
      */
     fun playContinueFromPageAyah(pageAyah: MushafPageAyah) {
-        stopOtherAudio(except = AudioSource.SURAH)
         val advanceSurah: (Int) -> Unit = { finishedSurah ->
             if (finishedSurah < 114) {
                 val nextNum = finishedSurah + 1
@@ -1300,15 +2079,20 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         if (audioPlayer.hasOfficialTimestampsSupportForCurrentReciter()) {
+            stopOtherAudio(except = AudioSource.SURAH)
             audioPlayer.playSurahFromAyah(
                 surahNumber = pageAyah.surahNumber,
                 surahName = pageAyah.surahName,
                 startAyahNumber = pageAyah.numberInSurah,
                 singleAyahOnly = false,
                 repeatMode = AyahRepeatMode.ONCE,
-                onSurahCompleted = advanceSurah
+                onSurahCompleted = advanceSurah,
+                onSingleAyahFallbackRequired = null
             )
+        } else if (EveryAyahMapper.resolveFolderForReciter(audioState.value.selectedReciter) != null) {
+            playSingleAyahDirectPerVerse(pageAyah, continueReading = true)
         } else {
+            stopOtherAudio(except = AudioSource.SURAH)
             audioPlayer.playSurah(
                 surahNumber = pageAyah.surahNumber,
                 surahName = pageAyah.surahName,
@@ -1317,6 +2101,33 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
             )
             emitToast("جاري تشغيل ${pageAyah.surahName} كاملة بصوت ${audioState.value.selectedReciter.arabicName}")
         }
+    }
+
+    private fun playSingleAyahDirectPerVerse(
+        pageAyah: MushafPageAyah,
+        continueReading: Boolean
+    ) {
+        stopOtherAudio(except = AudioSource.AYAH)
+        val reciter = audioState.value.selectedReciter
+        val ayahItem = AyahItem(
+            numberInSurah = pageAyah.numberInSurah,
+            text = pageAyah.text,
+            tafsir = "",
+            globalNumber = pageAyah.globalNumber,
+            juz = pageAyah.juz
+        )
+        ayahAudioPlayer.playAyah(
+            surahNumber = pageAyah.surahNumber,
+            ayah = ayahItem,
+            reciter = reciter,
+            continueReading = continueReading,
+            onAdvanceToNextAyah = { nextAyahNum ->
+                val nextPageAyah = findPageAyah(pageAyah.surahNumber, nextAyahNum)
+                if (nextPageAyah != null) {
+                    playSingleAyahDirectPerVerse(nextPageAyah, continueReading = true)
+                }
+            }
+        )
     }
 
     fun togglePlaySingleAyah(ayah: AyahItem) {
@@ -1351,6 +2162,9 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
 
     fun stopSingleAyahAudio() {
         ayahAudioPlayer.stop()
+        if (audioState.value.isSingleAyahMode) {
+            audioPlayer.pauseIfPlaying()
+        }
     }
 
     fun setAyahRepeatMode(mode: AyahRepeatMode) {
@@ -1394,13 +2208,12 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
         tafsirFetchJob = viewModelScope.launch {
-            if (!tafsirStatusesLoaded) {
-                tafsirStatusesLoaded = true
-                val downloaded = withContext(Dispatchers.IO) {
-                    TafsirRepository.getDownloadedBookIds(appCtx)
-                }
-                _tafsirState.update { it.copy(downloadedBookIds = downloaded) }
+            // Dynamically verify real local disk files on every Tafsir open so all downloaded
+            // books accurately display their green checkmark without stale/overwritten state.
+            val downloaded = withContext(Dispatchers.IO) {
+                TafsirRepository.getDownloadedBookIds(appCtx)
             }
+            _tafsirState.update { it.copy(downloadedBookIds = downloaded) }
             val result = TafsirRepository.getAyahTafsir(
                 context = appCtx,
                 book = book,
@@ -1477,9 +2290,12 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
             result.onSuccess {
+                val verifiedDiskIds = withContext(Dispatchers.IO) {
+                    TafsirRepository.getDownloadedBookIds(appCtx)
+                }
                 _tafsirState.update { state ->
                     state.copy(
-                        downloadedBookIds = state.downloadedBookIds + book.bookId,
+                        downloadedBookIds = verifiedDiskIds + book.bookId,
                         downloadingProgress = state.downloadingProgress - book.bookId
                     )
                 }
@@ -1691,8 +2507,10 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
         val surahNum = state.loadedSurahNumber ?: _quranState.value.activeSurah?.number ?: return
         val surahName = state.loadedSurahName.ifBlank { resolveSurahName(surahNum) }
         val reciter = state.selectedReciter
-        val url = state.activeStreamUrl ?: reciter.buildPrimaryAudioUrl(surahNum)
-        val downloadKey = "${reciter.id}_$surahNum"
+        val remoteUrl = state.activeStreamUrl?.takeIf {
+            it.startsWith("http://") || it.startsWith("https://")
+        } ?: reciter.buildPrimaryAudioUrl(surahNum)
+        val downloadKey = PersistentOfflineStorage.surahAudioKey(reciter.id, surahNum)
         val appCtx = getApplication<Application>().applicationContext
 
         if (activeSurahAudioDownloads.contains(downloadKey)) {
@@ -1705,26 +2523,36 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
                 PersistentOfflineStorage.isSurahAudioDownloaded(appCtx, reciter.id, surahNum)
             }
             if (alreadySaved) {
+                val diskKeys = withContext(Dispatchers.IO) {
+                    PersistentOfflineStorage.getDownloadedSurahKeys(appCtx)
+                }
+                _quranState.update { it.copy(downloadedSurahAudioKeys = diskKeys) }
                 emitToast("$surahName محفوظة بالفعل أوفلاين على مساحة الجهاز ✓")
                 return@launch
             }
 
             activeSurahAudioDownloads.add(downloadKey)
+            _quranState.update { it.copy(downloadingSurahAudioKeys = it.downloadingSurahAudioKeys + downloadKey) }
             emitToast("جاري حفظ $surahName أوفلاين (${reciter.arabicName})...")
             try {
                 val result = PersistentOfflineStorage.downloadSurahAudioOffline(
                     context = appCtx,
                     reciterId = reciter.id,
                     surahNumber = surahNum,
-                    streamUrl = url
+                    streamUrl = remoteUrl
                 )
                 result.onSuccess {
+                    val diskKeys = withContext(Dispatchers.IO) {
+                        PersistentOfflineStorage.getDownloadedSurahKeys(appCtx)
+                    }
+                    _quranState.update { it.copy(downloadedSurahAudioKeys = diskKeys) }
                     emitToast("تم حفظ $surahName أوفلاين على مساحة الجهاز ✓")
                 }.onFailure {
                     emitToast("تعذّر تحميل $surahName، تأكد من الاتصال بالإنترنت")
                 }
             } finally {
                 activeSurahAudioDownloads.remove(downloadKey)
+                _quranState.update { it.copy(downloadingSurahAudioKeys = it.downloadingSurahAudioKeys - downloadKey) }
             }
         }
     }
@@ -2075,11 +2903,7 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onGpsLocationDetected(location: Location) {
-        val lat = location.latitude
-        val lng = location.longitude
-        val label = String.format(Locale.US, "موقعك الحالي (%.2f, %.2f)", lat, lng)
-        updateQiblaLocation(lat, lng, label)
-        emitToast("تم تحديث اتجاه القبلة حسب موقعك")
+        onGlobalGpsDetected(location)
     }
 
     fun updateDeviceHeading(headingDeg: Float) {
@@ -2218,32 +3042,67 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setDefaultMuezzin(muezzin: MuezzinItem) {
+        val appCtx = getApplication<Application>().applicationContext
+        PrayerScheduleStore.saveDefaultMuezzin(appCtx, muezzin)
+        _defaultMuezzinId.value = muezzin.id
+        PrayerAlarmScheduler.scheduleAllPrayers(appCtx)
         viewModelScope.launch {
             prefs.setDefaultMuezzinId(muezzin.id)
-            if (muezzin.hasAudioSource()) {
-                emitToast("تم تعيين ${muezzin.name} كأذان افتراضي")
-            } else {
-                emitToast("تم تعيين ${muezzin.name} — اضغط «أضف ملف الصوت» لإرفاق ملف MP3 أو رابط")
-            }
+        }
+        if (muezzin.hasAudioSource()) {
+            emitToast("تم تعيين ${muezzin.name} كأذان افتراضي")
+        } else {
+            emitToast("تم تعيين ${muezzin.name} — اضغط «أضف ملف الصوت» لإرفاق ملف MP3 أو رابط")
         }
     }
 
     fun setFajrMuezzin(muezzin: MuezzinItem) {
+        val appCtx = getApplication<Application>().applicationContext
+        PrayerScheduleStore.saveFajrMuezzin(appCtx, muezzin)
+        PrayerScheduleStore.setUseDedicatedFajr(appCtx, true)
+        _fajrMuezzinId.value = muezzin.id
+        _useDedicatedFajrAdhan.value = true
+        PrayerAlarmScheduler.scheduleAllPrayers(appCtx)
         viewModelScope.launch {
             prefs.setFajrMuezzinId(muezzin.id)
             prefs.setUseDedicatedFajrAdhan(true)
-            if (muezzin.hasAudioSource()) {
-                emitToast("تم تعيين ${muezzin.name} لأذان الفجر")
-            } else {
-                emitToast("تم تعيين ${muezzin.name} للفجر — اضغط «أضف ملف الصوت» لإرفاق ملف MP3 أو رابط")
-            }
+        }
+        if (muezzin.hasAudioSource()) {
+            emitToast("تم تعيين ${muezzin.name} لأذان الفجر")
+        } else {
+            emitToast("تم تعيين ${muezzin.name} للفجر — اضغط «أضف ملف الصوت» لإرفاق ملف MP3 أو رابط")
         }
     }
 
     fun setUseDedicatedFajrAdhan(enabled: Boolean) {
+        val appCtx = getApplication<Application>().applicationContext
+        PrayerScheduleStore.setUseDedicatedFajr(appCtx, enabled)
+        _useDedicatedFajrAdhan.value = enabled
+        PrayerAlarmScheduler.scheduleAllPrayers(appCtx)
         viewModelScope.launch {
             prefs.setUseDedicatedFajrAdhan(enabled)
         }
+    }
+
+    fun setPerPrayerMuezzinEnabled(enabled: Boolean) {
+        val appCtx = getApplication<Application>().applicationContext
+        PrayerScheduleStore.setPerPrayerMuezzinEnabled(appCtx, enabled)
+        _perPrayerMuezzinEnabled.value = enabled
+        _perPrayerMuezzinIds.value = PrayerScheduleStore.getPerPrayerMuezzinIds(appCtx)
+        PrayerAlarmScheduler.scheduleAllPrayers(appCtx)
+        emitToast(
+            if (enabled) "تم تفعيل اختيار مؤذن مخصص لكل صلاة"
+            else "تم العودة لمؤذن موحّد لجميع الصلوات"
+        )
+    }
+
+    fun setMuezzinForPrayer(prayerKey: String, muezzin: MuezzinItem) {
+        val appCtx = getApplication<Application>().applicationContext
+        PrayerScheduleStore.saveMuezzinForPrayer(appCtx, prayerKey, muezzin)
+        _perPrayerMuezzinIds.value = PrayerScheduleStore.getPerPrayerMuezzinIds(appCtx)
+        PrayerAlarmScheduler.scheduleAllPrayers(appCtx)
+        val pArabic = PrayerScheduleStore.prayerOrder.find { it.first == prayerKey }?.second ?: prayerKey
+        emitToast("تم تعيين ${muezzin.name} لصلاة $pArabic")
     }
 
     fun addCustomMuezzinFromUrl(name: String, url: String, isFajr: Boolean) {
@@ -2263,9 +3122,9 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
             val updated = listOf(newItem) + customMuezzins.value
             prefs.saveCustomMuezzins(updated)
             if (isFajr) {
-                prefs.setFajrMuezzinId(newItem.id)
+                setFajrMuezzin(newItem)
             } else {
-                prefs.setDefaultMuezzinId(newItem.id)
+                setDefaultMuezzin(newItem)
             }
             emitToast("تمت إضافة $name إلى مكتبة المؤذنين")
         }
@@ -2317,6 +3176,10 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 prefs.saveMuezzinAudioOverrides(nextMap)
             }
+            PrayerScheduleStore.refreshSavedAudioMetadataIfSelected(
+                appCtx,
+                muezzin.copy(primaryUrl = cleanUrl, localFilePath = null)
+            )
             emitToast("تم تحديث رابط الصوت لـ ${muezzin.name}")
         }
     }
@@ -2381,6 +3244,10 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 prefs.saveMuezzinAudioOverrides(nextMap)
             }
+            PrayerScheduleStore.refreshSavedAudioMetadataIfSelected(
+                getApplication(),
+                muezzin.copy(primaryUrl = "", localFilePath = savedPath)
+            )
             emitToast("تم حفظ الصوت المخصص محلياً لـ ${muezzin.name}")
         }
     }
@@ -2398,6 +3265,10 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
             val nextMap = muezzinAudioOverrides.value.toMutableMap()
             nextMap.remove(muezzin.id)
             prefs.saveMuezzinAudioOverrides(nextMap)
+            val original = (_repoMuezzins.value + MuezzinLibraryData.builtInMuezzins).find { it.id == muezzin.id }
+            if (original != null) {
+                PrayerScheduleStore.refreshSavedAudioMetadataIfSelected(getApplication(), original)
+            }
             emitToast("تمت استعادة الصوت الافتراضي لـ ${muezzin.name}")
         }
     }
@@ -2436,9 +3307,9 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
             val updated = listOf(newItem) + customMuezzins.value
             prefs.saveCustomMuezzins(updated)
             if (isFajr) {
-                prefs.setFajrMuezzinId(newItem.id)
+                setFajrMuezzin(newItem)
             } else {
-                prefs.setDefaultMuezzinId(newItem.id)
+                setDefaultMuezzin(newItem)
             }
             emitToast("تم حفظ ملف $name محلياً بنجاح")
         }
@@ -2454,11 +3325,14 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
             }
             val updated = customMuezzins.value.filterNot { it.id == muezzin.id }
             prefs.saveCustomMuezzins(updated)
+            val fallbackBuiltIn = MuezzinLibraryData.builtInMuezzins.first()
             if (defaultMuezzinId.value == muezzin.id) {
-                prefs.setDefaultMuezzinId(MuezzinLibraryData.defaultMuezzinId)
+                setDefaultMuezzin(fallbackBuiltIn)
             }
             if (fajrMuezzinId.value == muezzin.id) {
-                prefs.setFajrMuezzinId(MuezzinLibraryData.defaultFajrMuezzinId)
+                val fallbackFajr = MuezzinLibraryData.builtInMuezzins.find { it.id == MuezzinLibraryData.defaultFajrMuezzinId }
+                    ?: fallbackBuiltIn
+                setFajrMuezzin(fallbackFajr)
             }
             emitToast("تم حذف ${muezzin.name}")
         }
@@ -2499,6 +3373,290 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // =========================================================================
+    // MODULE G2: PRE-ADHAN REMINDER & POST-ADHAN IQAMA ALERTS (تنبيهات قبل وبعد الأذان)
+    // =========================================================================
+
+    fun openPrayerAlertsSettings() {
+        _prayerAlertsSettingsOpen.value = true
+        if (_alertSoundsCatalog.value.isEmpty() && !_isSyncingAlertSounds.value) {
+            syncAlertSoundsCatalog(manual = false)
+        }
+    }
+
+    fun closePrayerAlertsSettings() {
+        AdhanPlaybackService.sendControlAction(
+            getApplication<Application>().applicationContext,
+            AdhanPlaybackService.ACTION_STOP_ADHAN
+        )
+        _prayerAlertsSettingsOpen.value = false
+    }
+
+    fun setPreAdhanEnabled(enabled: Boolean) {
+        updatePrayerAlertsSettings { it.copy(preAdhanEnabled = enabled) }
+        emitToast(if (enabled) "تم تفعيل تنبيه قبل الأذان" else "تم إيقاف تنبيه قبل الأذان")
+    }
+
+    fun setPreAdhanMinutes(minutes: Int) {
+        if (minutes !in PrayerAlertsSettings.PRE_ADHAN_MINUTE_OPTIONS) return
+        updatePrayerAlertsSettings { it.copy(preAdhanMinutes = minutes) }
+        emitToast("سيتم التذكير قبل الأذان بـ $minutes دقيقة")
+    }
+
+    fun setIqamaEnabled(enabled: Boolean) {
+        updatePrayerAlertsSettings { it.copy(iqamaEnabled = enabled) }
+        updatePrayerCountdownOnce()
+        emitToast(if (enabled) "تم تفعيل تنبيه الإقامة بعد الأذان" else "تم إيقاف تنبيه الإقامة")
+    }
+
+    fun setIqamaMinutesForPrayer(prayerKey: String, minutes: Int) {
+        val clamped = minutes.coerceIn(
+            PrayerAlertsSettings.MIN_IQAMA_MINUTES,
+            PrayerAlertsSettings.MAX_IQAMA_MINUTES
+        )
+        updatePrayerAlertsSettings { current ->
+            val updatedMap = current.iqamaMinutesByPrayer.toMutableMap().apply {
+                put(prayerKey, clamped)
+            }
+            current.copy(iqamaMinutesByPrayer = updatedMap)
+        }
+        updatePrayerCountdownOnce()
+    }
+
+    fun resetIqamaMinutesToDefaults() {
+        updatePrayerAlertsSettings { it.copy(iqamaMinutesByPrayer = PrayerAlertsSettings.DEFAULT_IQAMA_MINUTES) }
+        updatePrayerCountdownOnce()
+        emitToast("تم استعادة أوقات الإقامة الافتراضية")
+    }
+
+    fun selectPreAdhanSound(sound: PrayerAlertSound) {
+        updatePrayerAlertsSettings(markPreAdhanSoundUserCustomized = true) {
+            it.copy(
+                preAdhanSoundId = sound.id,
+                preAdhanSoundName = sound.name,
+                preAdhanSoundUrl = sound.url,
+                preAdhanIsPerPrayer = sound.isPerPrayer,
+                preAdhanPerPrayerUrls = sound.perPrayerUrls
+            )
+        }
+        emitToast("تم اختيار صوت قبل الأذان: ${sound.name}")
+        if (!sound.isBuiltInFallback && (sound.url.isNotBlank() || sound.perPrayerUrls.isNotEmpty())) {
+            downloadAlertSoundOffline(sound, silent = true)
+        }
+    }
+
+    fun selectIqamaSound(sound: PrayerAlertSound) {
+        updatePrayerAlertsSettings(markIqamaSoundUserCustomized = true) {
+            it.copy(
+                iqamaSoundId = sound.id,
+                iqamaSoundName = sound.name,
+                iqamaSoundUrl = sound.url
+            )
+        }
+        emitToast("تم اختيار صوت الإقامة: ${sound.name}")
+        if (!sound.isBuiltInFallback && sound.url.isNotBlank()) {
+            downloadAlertSoundOffline(sound, silent = true)
+        }
+    }
+
+    fun syncAlertSoundsCatalog(manual: Boolean) {
+        if (_isSyncingAlertSounds.value) return
+        viewModelScope.launch {
+            _isSyncingAlertSounds.value = true
+            val appCtx = getApplication<Application>().applicationContext
+            val result = PrayerAlertRepository.syncCatalogFromRemote(appCtx)
+            _isSyncingAlertSounds.value = false
+            result.onSuccess { list ->
+                _alertSoundsCatalog.value = list
+                _cachedAlertSoundIds.value = withContext(Dispatchers.IO) {
+                    PrayerAlertRepository.getAllCachedAlertIds(appCtx, list)
+                }
+                applyRemoteDefaultAlertSoundsIfNeeded(appCtx, list)
+                if (manual) emitToast("تم تحديث قائمة أصوات التنبيهات (${list.size})")
+            }.onFailure {
+                if (manual) emitToast("تعذّر تحديث أصوات التنبيهات، تأكد من الاتصال بالإنترنت")
+            }
+        }
+    }
+
+    fun downloadAlertSoundOffline(sound: PrayerAlertSound, silent: Boolean = false) {
+        if (sound.isBuiltInFallback) return
+        if (!sound.isPerPrayer && sound.url.isBlank()) return
+        if (sound.isPerPrayer && sound.perPrayerUrls.isEmpty() && sound.url.isBlank()) return
+        if (_downloadingAlertSoundIds.value.contains(sound.id)) return
+        val appCtx = getApplication<Application>().applicationContext
+        viewModelScope.launch {
+            val alreadyCached = withContext(Dispatchers.IO) {
+                PrayerAlertRepository.isSoundCached(appCtx, sound)
+            }
+            if (alreadyCached) {
+                _cachedAlertSoundIds.value = withContext(Dispatchers.IO) {
+                    PrayerAlertRepository.getAllCachedAlertIds(appCtx, _alertSoundsCatalog.value)
+                }
+                return@launch
+            }
+            _downloadingAlertSoundIds.update { it + sound.id }
+            val result = PrayerAlertRepository.downloadAlertSound(appCtx, sound)
+            _downloadingAlertSoundIds.update { it - sound.id }
+            result.onSuccess {
+                _cachedAlertSoundIds.value = withContext(Dispatchers.IO) {
+                    PrayerAlertRepository.getAllCachedAlertIds(appCtx, _alertSoundsCatalog.value)
+                }
+                if (!silent) {
+                    val msg = if (sound.isPerPrayer) {
+                        "تم حفظ حزمة «${sound.name}» للصلوات الخمس أوفلاين"
+                    } else {
+                        "تم حفظ «${sound.name}» للتشغيل دون إنترنت"
+                    }
+                    emitToast(msg)
+                }
+            }.onFailure {
+                if (!silent) emitToast("تعذّر حفظ الصوت حالياً")
+            }
+        }
+    }
+
+    fun toggleAlertSoundPreview(sound: PrayerAlertSound) {
+        val appCtx = getApplication<Application>().applicationContext
+        val state = adhanState.value
+        val isSameActive = state.activeMuezzinId == sound.id && (
+            state.status == AdhanPlaybackStatus.PLAYING ||
+                state.status == AdhanPlaybackStatus.FALLBACK_PLAYING ||
+                state.status == AdhanPlaybackStatus.LOADING
+            )
+        if (isSameActive) {
+            AdhanPlaybackService.sendControlAction(appCtx, AdhanPlaybackService.ACTION_STOP_ADHAN)
+            return
+        }
+
+        viewModelScope.launch {
+            val sources = withContext(Dispatchers.IO) {
+                val resolved = ArrayList<String>()
+                if (!sound.isBuiltInFallback) {
+                    if (sound.isPerPrayer) {
+                        val dhuhrCached = PrayerAlertRepository.getCachedPerPrayerAlertFile(appCtx, sound.id, "dhuhr")
+                        if (sound.url.isNotBlank()) {
+                            resolved.add(sound.url)
+                        }
+                        if (dhuhrCached.exists() && dhuhrCached.length() > 0L) {
+                            resolved.add(dhuhrCached.absolutePath)
+                        } else {
+                            PrayerAlertsSettings.PRAYER_URL_KEYS.firstNotNullOfOrNull { pKey ->
+                                PrayerAlertRepository.getCachedPerPrayerAlertFile(appCtx, sound.id, pKey)
+                                    .takeIf { it.exists() && it.length() > 0L }
+                            }?.let { resolved.add(it.absolutePath) }
+                        }
+                    } else {
+                        val cached = PrayerAlertRepository.getCachedAlertFile(appCtx, sound.id)
+                        if (cached.exists() && cached.length() > 0L) {
+                            resolved.add(cached.absolutePath)
+                        }
+                        if (sound.url.isNotBlank()) {
+                            resolved.add(sound.url)
+                        }
+                    }
+                }
+                ArrayList(resolved.distinct())
+            }
+            AdhanPlaybackService.startAlertPreview(
+                context = appCtx,
+                soundId = sound.id,
+                soundName = sound.name,
+                sources = sources
+            )
+        }
+    }
+
+    private fun updatePrayerAlertsSettings(
+        markPreAdhanSoundUserCustomized: Boolean = false,
+        markIqamaSoundUserCustomized: Boolean = false,
+        transform: (PrayerAlertsSettings) -> PrayerAlertsSettings
+    ) {
+        val appCtx = getApplication<Application>().applicationContext
+        val updated = transform(_prayerAlertsSettings.value)
+        _prayerAlertsSettings.value = updated
+        PrayerScheduleStore.savePrayerAlertsSettings(
+            context = appCtx,
+            settings = updated,
+            markPreAdhanSoundUserCustomized = markPreAdhanSoundUserCustomized,
+            markIqamaSoundUserCustomized = markIqamaSoundUserCustomized
+        )
+        PrayerAlarmScheduler.scheduleAllPrayers(appCtx)
+    }
+
+    private fun applyRemoteDefaultAlertSoundsIfNeeded(
+        appCtx: Context,
+        catalog: List<PrayerAlertSound>
+    ) {
+        if (catalog.isEmpty()) return
+        var updated = _prayerAlertsSettings.value
+        var changed = false
+
+        // Always make "pre_voice_hamed" the default Pre-Adhan sound unless the user explicitly chose another
+        val preferredPre = catalog.firstOrNull {
+            it.id.equals(PrayerAlertsSettings.PREFERRED_DEFAULT_PRE_ADHAN_SOUND_ID, ignoreCase = true)
+        }
+        if (!PrayerScheduleStore.isPreAdhanSoundUserCustomized(appCtx)) {
+            val defaultPre = preferredPre
+                ?: catalog.firstOrNull { it.category == PrayerAlertCategory.PRE_ADHAN }
+                ?: catalog.firstOrNull { it.category == PrayerAlertCategory.BOTH }
+                ?: catalog.firstOrNull()
+            if (defaultPre != null && (
+                updated.preAdhanSoundId != defaultPre.id ||
+                    updated.preAdhanIsPerPrayer != defaultPre.isPerPrayer ||
+                    updated.preAdhanPerPrayerUrls != defaultPre.perPrayerUrls
+                )
+            ) {
+                updated = updated.copy(
+                    preAdhanSoundId = defaultPre.id,
+                    preAdhanSoundName = defaultPre.name,
+                    preAdhanSoundUrl = defaultPre.url,
+                    preAdhanIsPerPrayer = defaultPre.isPerPrayer,
+                    preAdhanPerPrayerUrls = defaultPre.perPrayerUrls
+                )
+                changed = true
+            }
+            if (defaultPre != null) {
+                downloadAlertSoundOffline(defaultPre, silent = true)
+            }
+        } else {
+            // Keep selected per_prayer sound URLs fresh and ensure all 5 MP3s are cached
+            catalog.firstOrNull { it.id == updated.preAdhanSoundId }?.let { activePre ->
+                if (activePre.isPerPrayer && updated.preAdhanPerPrayerUrls != activePre.perPrayerUrls) {
+                    updated = updated.copy(
+                        preAdhanSoundUrl = activePre.url,
+                        preAdhanIsPerPrayer = true,
+                        preAdhanPerPrayerUrls = activePre.perPrayerUrls
+                    )
+                    changed = true
+                }
+                downloadAlertSoundOffline(activePre, silent = true)
+            }
+        }
+
+        if (!PrayerScheduleStore.isIqamaSoundUserCustomized(appCtx) &&
+            updated.iqamaSoundId == PrayerAlertsSettings.DEFAULT_IQAMA_SOUND_ID
+        ) {
+            val defaultIqama = catalog.firstOrNull { it.category == PrayerAlertCategory.IQAMA }
+                ?: catalog.firstOrNull { it.category == PrayerAlertCategory.BOTH }
+                ?: catalog.firstOrNull()
+            if (defaultIqama != null) {
+                updated = updated.copy(
+                    iqamaSoundId = defaultIqama.id,
+                    iqamaSoundName = defaultIqama.name,
+                    iqamaSoundUrl = defaultIqama.url
+                )
+                changed = true
+                downloadAlertSoundOffline(defaultIqama, silent = true)
+            }
+        }
+
+        if (changed) {
+            _prayerAlertsSettings.value = updated
+            PrayerScheduleStore.savePrayerAlertsSettings(appCtx, updated)
+        }
+    }
+
+    // =========================================================================
     // MODULE H: IN-APP DIRECT AUTO-UPDATE (التحديث التلقائي المباشر داخل التطبيق)
     // =========================================================================
 
@@ -2515,6 +3673,10 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
             )
             result.onSuccess { release ->
                 if (release != null) {
+                    if (!manual && AppUpdateManager.shouldSuppressPopupForDismissal(appCtx, release.versionName)) {
+                        _appUpdateState.update { it.copy(isChecking = false) }
+                        return@onSuccess
+                    }
                     _appUpdateState.update {
                         it.copy(
                             isChecking = false,
@@ -2526,7 +3688,7 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
                 } else {
                     _appUpdateState.update { it.copy(isChecking = false) }
                     if (manual) {
-                        emitToast("التطبيق محدّث لآخر إصدار (${BuildConfig.VERSION_NAME})")
+                        emitToast("أنت على أحدث إصدار (${BuildConfig.VERSION_NAME})")
                     }
                 }
             }.onFailure {
@@ -2540,6 +3702,7 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
 
     fun startAppUpdateDownload() {
         val release = _appUpdateState.value.availableRelease ?: return
+        AppUpdateManager.clearDismissal(getApplication<Application>().applicationContext)
         appUpdateDownloadJob?.cancel()
         appUpdateDownloadJob = viewModelScope.launch {
             _appUpdateState.update {
@@ -2624,7 +3787,16 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun dismissAppUpdateDialog() {
-        if (_appUpdateState.value.stage == AppUpdateDialogStage.DOWNLOADING) return
+        val current = _appUpdateState.value
+        if (current.stage == AppUpdateDialogStage.DOWNLOADING) return
+        if (current.stage == AppUpdateDialogStage.UPDATE_AVAILABLE) {
+            current.availableRelease?.versionName?.let { dismissedVersion ->
+                AppUpdateManager.recordDismissal(
+                    getApplication<Application>().applicationContext,
+                    dismissedVersion
+                )
+            }
+        }
         _appUpdateState.update { it.copy(stage = AppUpdateDialogStage.NONE, errorMessage = null) }
     }
 

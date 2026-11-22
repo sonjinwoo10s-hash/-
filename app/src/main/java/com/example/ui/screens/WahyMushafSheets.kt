@@ -26,6 +26,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.BluetoothAudio
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Headset
@@ -377,7 +378,9 @@ fun WahyOnlineAudioPanel(
     onToggleWordByWord: (Boolean) -> Unit,
     onSyncLatencyOffsetChange: (Int) -> Unit,
     onDownloadMp3: () -> Unit,
-    onStopSingleAyah: () -> Unit
+    onStopSingleAyah: () -> Unit,
+    isCurrentSurahDownloaded: Boolean = false,
+    isCurrentSurahDownloading: Boolean = false
 ) {
     val view = LocalView.current
     val bgColor = if (isNightMode) Color(0xFF1A221E) else Color(0xFFF6EFE0)
@@ -437,8 +440,13 @@ fun WahyOnlineAudioPanel(
                     Spacer(modifier = Modifier.width(10.dp))
 
                     Column(modifier = Modifier.weight(1f)) {
+                        val isOfflineReady = isCurrentSurahDownloaded || (isCurrentSurahLoaded && audioState.isPlayingOffline)
                         Text(
-                            text = "تلاوة $currentSurahName (أونلاين)",
+                            text = if (isOfflineReady) {
+                                "تلاوة $currentSurahName (أوفلاين ✓)"
+                            } else {
+                                "تلاوة $currentSurahName (أونلاين)"
+                            },
                             style = MaterialTheme.typography.labelLarge,
                             fontWeight = FontWeight.Bold,
                             color = textColor,
@@ -511,11 +519,23 @@ fun WahyOnlineAudioPanel(
                             .size(44.dp)
                             .testTag("mushaf_audio_download_button")
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Download,
-                            contentDescription = "تحميل السورة MP3",
-                            tint = mutedColor
-                        )
+                        when {
+                            isCurrentSurahDownloading -> CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp,
+                                color = EmeraldGreen
+                            )
+                            isCurrentSurahDownloaded || (isCurrentSurahLoaded && audioState.isPlayingOffline) -> Icon(
+                                imageVector = Icons.Default.CheckCircle,
+                                contentDescription = "تم تحميل السورة أوفلاين",
+                                tint = Color(0xFF16A34A)
+                            )
+                            else -> Icon(
+                                imageVector = Icons.Default.Download,
+                                contentDescription = "تحميل السورة MP3",
+                                tint = mutedColor
+                            )
+                        }
                     }
                 }
             }

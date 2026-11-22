@@ -21,4 +21,14 @@
     <string name="qibla_direction">اتجاه القبلة</string>
     <string name="worship_guides">أدلة العبادات الميسّرة</string>
     <string name="app_settings">إعدادات التطبيق</string>
+    <string name="islamic_midnight_label">منتصف الليل الشرعي</string>
+    <string name="last_third_night_label">الثلث الأخير من الليل</string>
+    <string name="widget_prayer_times_label">رفيق المسلم - مواقيت الصلاة</string>
+    <string name="widget_prayer_times_desc">يعرض الصلاة القادمة والوقت المتبقي والصلوات الخمس ومنتصف الليل الشرعي على الشاشة الرئيسية</string>
+    <string name="widget_refresh_desc">تحديث مواقيت الصلاة</string>
+    <string name="prayer_fajr">الفجر</string>
+    <string name="prayer_dhuhr">الظهر</string>
+    <string name="prayer_asr">العصر</string>
+    <string name="prayer_maghrib">المغرب</string>
+    <string name="prayer_isha">العشاء</string>
 </resources>

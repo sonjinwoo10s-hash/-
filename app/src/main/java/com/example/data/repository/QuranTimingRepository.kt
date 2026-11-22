@@ -2,6 +2,7 @@ package com.example.data.repository
 
 import android.content.Context
 import android.util.LruCache
+import com.example.BuildConfig
 import com.example.data.local.OfflineIslamicData
 import com.example.data.model.ReciterOption
 import kotlinx.coroutines.Dispatchers
@@ -148,9 +149,9 @@ object QuranTimingRepository {
     }
 
     /**
-     * Maps supported popular reciters to their official Quran.com v4 `chapter_recitations` IDs.
-     * Returns `null` for mp3quran.net-only reciters so they cleanly fall back to full-Surah playback
-     * with Ayah highlighting disabled (preventing any inaccurate timing).
+     * Maps supported popular reciters to their official Quran.com v4 / QDC chapter recitation IDs.
+     * Returns `null` for mp3quran.net-only reciters so single-Ayah playback cleanly uses direct
+     * per-Ayah audio URLs with Ayah highlighting instead of misaligned timestamps.
      */
     fun resolveQuranComReciterId(reciter: ReciterOption): Int? {
         when (reciter.id) {
@@ -164,7 +165,6 @@ object QuranTimingRepository {
             "featured_shatri" -> return 4
             "featured_rifai" -> return 5
             "featured_maher" -> return 161
-            "featured_ghamdi" -> return 4
         }
         val norm = OfflineIslamicData.normalizeArabic(reciter.arabicName)
         val riwayahNorm = OfflineIslamicData.normalizeArabic(reciter.riwayahName)
@@ -197,12 +197,10 @@ object QuranTimingRepository {
     }
 
     /**
-     * Loads official Quran.com v4 audio URL + millisecond timestamps from:
-     *  1) Tiny LRU memory cache
-     *  2) Local disk cache (`filesDir/quran_timings/r{reciterId}_s{surahNumber}.json`)
-     *  3) Remote Quran.com v4 API (`chapter_recitations/{reciterId}/{surahNumber}?segments=true`)
+     * Strictly local-only lookup (memory LRU + local disk cache) with ZERO network requests.
+     * Used for instant offline-first playback when a Surah MP3 is already downloaded on device.
      */
-    suspend fun fetchSurahTimings(
+    suspend fun getCachedSurahTimingsLocalOnly(
         context: Context?,
         reciter: ReciterOption,
         surahNumber: Int
@@ -214,52 +212,108 @@ object QuranTimingRepository {
             memoryCache.get(cacheKey)?.let { return@withContext it }
         }
 
-        // 1. Try local disk cache first (instant & offline-ready)
         if (context != null) {
             val diskFile = getDiskCacheFile(context, reciterId, surahNumber)
             if (diskFile.exists() && diskFile.length() > 32L) {
                 val cached = runCatching {
                     parseTimingJson(diskFile.readText(Charsets.UTF_8), reciterId, surahNumber)
                 }.getOrNull()
-                if (cached != null) {
+                if (cached != null && cached.ayahs.isNotEmpty()) {
                     synchronized(memoryCache) { memoryCache.put(cacheKey, cached) }
                     return@withContext cached
                 }
             }
         }
+        null
+    }
 
-        // 2. Fetch fresh from Quran.com v4 API
-        val url = "https://api.quran.com/api/v4/chapter_recitations/$reciterId/$surahNumber?segments=true"
-        try {
+    /**
+     * Loads official Quran.com audio URL + millisecond timestamps & word segments from:
+     *  1) Tiny LRU memory cache
+     *  2) Local disk cache (`filesDir/offline_quran/timings/r{reciterId}_s{surahNumber}.json`)
+     *  3) Primary Quran.com v4 endpoint: `api.quran.com/api/v4/chapter_recitations/{id}/{surah}?segments=true`
+     *  4) Fallback Quran.com QDC endpoint: `api.qurancdn.com/api/qdc/audio/reciters/{id}/audio_files?chapter={surah}&segments=true`
+     *     (used automatically if v4 omits `timestamps`/`segments` for that reciter).
+     */
+    suspend fun fetchSurahTimings(
+        context: Context?,
+        reciter: ReciterOption,
+        surahNumber: Int
+    ): SurahTimingMap? = withContext(Dispatchers.IO) {
+        getCachedSurahTimingsLocalOnly(context, reciter, surahNumber)?.let { return@withContext it }
+        val reciterId = resolveQuranComReciterId(reciter) ?: return@withContext null
+        val cacheKey = "${reciterId}_$surahNumber"
+
+        // 2. Fetch fresh from Quran.com v4 API, falling back to Quran.com QDC audio_files if timestamps are omitted
+        val candidateEndpoints = listOf(
+            "https://api.quran.com/api/v4/chapter_recitations/$reciterId/$surahNumber?segments=true",
+            "https://api.qurancdn.com/api/qdc/audio/reciters/$reciterId/audio_files?chapter=$surahNumber&segments=true"
+        )
+
+        var bestWithoutWordSegments: Pair<SurahTimingMap, String>? = null
+
+        for (endpoint in candidateEndpoints) {
+            val body = fetchRawJson(endpoint) ?: continue
+            val parsed = runCatching {
+                parseTimingJson(body, reciterId, surahNumber)
+            }.getOrNull() ?: continue
+
+            if (parsed.hasWordSegments) {
+                persistTimingCache(context, reciterId, surahNumber, body)
+                synchronized(memoryCache) { memoryCache.put(cacheKey, parsed) }
+                return@withContext parsed
+            } else if (bestWithoutWordSegments == null) {
+                bestWithoutWordSegments = parsed to body
+            }
+        }
+
+        bestWithoutWordSegments?.let { (parsed, body) ->
+            persistTimingCache(context, reciterId, surahNumber, body)
+            synchronized(memoryCache) { memoryCache.put(cacheKey, parsed) }
+            return@withContext parsed
+        }
+
+        null
+    }
+
+    private fun fetchRawJson(url: String): String? {
+        return try {
             val req = Request.Builder()
                 .url(url)
                 .header("Accept", "application/json")
+                .header("User-Agent", "RafiqAlMuslim/${BuildConfig.VERSION_NAME} (Android)")
                 .build()
-            val body = client.newCall(req).execute().use { res ->
-                if (!res.isSuccessful) return@withContext null
-                res.body?.string() ?: return@withContext null
+            client.newCall(req).execute().use { res ->
+                if (!res.isSuccessful) return null
+                res.body?.string()
             }
-
-            val parsed = parseTimingJson(body, reciterId, surahNumber) ?: return@withContext null
-
-            // Persist lightweight JSON locally for future instant reuse
-            if (context != null) {
-                runCatching {
-                    val target = getDiskCacheFile(context, reciterId, surahNumber)
-                    val tmp = File(target.parentFile, "${target.name}.tmp")
-                    tmp.writeText(body, Charsets.UTF_8)
-                    if (target.exists()) target.delete()
-                    if (!tmp.renameTo(target)) {
-                        target.writeText(body, Charsets.UTF_8)
-                        tmp.delete()
-                    }
-                }
-            }
-
-            synchronized(memoryCache) { memoryCache.put(cacheKey, parsed) }
-            parsed
         } catch (_: Exception) {
             null
+        }
+    }
+
+    private fun persistTimingCache(context: Context?, reciterId: Int, surahNumber: Int, body: String) {
+        if (context == null) return
+        runCatching {
+            val target = getDiskCacheFile(context, reciterId, surahNumber)
+            val tmp = File(target.parentFile, "${target.name}.tmp")
+            tmp.writeText(body, Charsets.UTF_8)
+            if (target.exists()) target.delete()
+            if (!tmp.renameTo(target)) {
+                target.writeText(body, Charsets.UTF_8)
+                tmp.delete()
+            }
+        }
+    }
+
+    private fun normalizeAudioUrl(raw: String): String? {
+        val trimmed = raw.trim()
+        if (trimmed.isBlank()) return null
+        return when {
+            trimmed.startsWith("https://") || trimmed.startsWith("http://") -> trimmed
+            trimmed.startsWith("//") -> "https:$trimmed"
+            trimmed.startsWith("/") -> "https://download.quranicaudio.com$trimmed"
+            else -> "https://verses.quran.com/$trimmed"
         }
     }
 
@@ -267,16 +321,28 @@ object QuranTimingRepository {
         rawJson: String,
         reciterId: Int,
         surahNumber: Int
-    ): SurahTimingMap? {
+    ): SurahTimingMap? = runCatching {
         val root = JSONObject(rawJson)
-        val audioFile = root.optJSONObject("audio_file") ?: return null
-        val audioUrl = audioFile.optString("audio_url", "").trim()
-        if (audioUrl.isBlank() || (!audioUrl.startsWith("https://") && !audioUrl.startsWith("http://"))) {
-            return null
-        }
+        val audioFile = root.optJSONObject("audio_file")
+            ?: root.optJSONArray("audio_files")?.let { arr ->
+                var matched: JSONObject? = null
+                for (k in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(k) ?: continue
+                    if (obj.optInt("chapter_id", -1) == surahNumber) {
+                        matched = obj
+                        break
+                    }
+                }
+                matched ?: arr.optJSONObject(0)
+            }
+            ?: return@runCatching null
 
-        val timestamps = audioFile.optJSONArray("timestamps") ?: return null
-        if (timestamps.length() == 0) return null
+        val audioUrl = normalizeAudioUrl(audioFile.optString("audio_url", "")) ?: return@runCatching null
+
+        val timestamps = audioFile.optJSONArray("timestamps")
+            ?: audioFile.optJSONArray("verse_timings")
+            ?: return@runCatching null
+        if (timestamps.length() == 0) return@runCatching null
 
         val entries = ArrayList<AyahTimingEntry>(timestamps.length())
         var anyWordSegments = false
@@ -287,31 +353,59 @@ object QuranTimingRepository {
             val parts = verseKey.split(":")
             val sNum = parts.getOrNull(0)?.toIntOrNull() ?: surahNumber
             val aNum = parts.getOrNull(1)?.toIntOrNull() ?: (i + 1)
-            val fromMs = obj.optInt("timestamp_from", -1)
-            val toMs = obj.optInt("timestamp_to", -1)
+            val fromMs = obj.optDouble("timestamp_from", -1.0).toInt()
+            val toMs = obj.optDouble("timestamp_to", -1.0).toInt()
             if (fromMs < 0 || toMs <= fromMs) continue
 
             val segArray = obj.optJSONArray("segments")
-            val wordSegments = ArrayList<WordTimingSegment>(segArray?.length() ?: 0)
+            val rawWordTriplets = ArrayList<Triple<Int, Int, Int>>(segArray?.length() ?: 0)
             if (segArray != null) {
                 for (j in 0 until segArray.length()) {
                     val seg = segArray.optJSONArray(j) ?: continue
-                    if (seg.length() >= 3) {
-                        val wordPos1Based = seg.optInt(0, -1)
-                        val segStart = seg.optInt(1, -1)
-                        val segEnd = seg.optInt(2, -1)
-                        if (wordPos1Based > 0 && segStart >= 0 && segEnd > segStart) {
-                            wordSegments.add(
-                                WordTimingSegment(
-                                    wordIndexZeroBased = wordPos1Based - 1,
-                                    startMs = segStart,
-                                    endMs = segEnd
-                                )
-                            )
+                    val len = seg.length()
+                    if (len == 3) {
+                        val wordPos = seg.optInt(0, -1)
+                        val segStart = seg.optDouble(1, -1.0).toInt()
+                        val segEnd = seg.optDouble(2, -1.0).toInt()
+                        if (wordPos >= 0 && segStart >= 0 && segEnd > segStart) {
+                            rawWordTriplets.add(Triple(wordPos, segStart, segEnd))
+                        }
+                    } else if (len >= 4) {
+                        // Some QDC payloads include 4-element arrays: [wordPos, wordPosEnd, startMs, endMs]
+                        val firstVal = seg.optInt(0, -1)
+                        val secondVal = seg.optInt(1, -1)
+                        val thirdVal = seg.optDouble(2, -1.0).toInt()
+                        val fourthVal = seg.optDouble(3, -1.0).toInt()
+                        if (thirdVal >= 0 && fourthVal > thirdVal) {
+                            val wordPos = if (firstVal > 0) firstVal else secondVal
+                            if (wordPos >= 0) {
+                                rawWordTriplets.add(Triple(wordPos, thirdVal, fourthVal))
+                            }
+                        } else if (firstVal >= 0 && secondVal >= 0 && thirdVal > secondVal) {
+                            rawWordTriplets.add(Triple(firstVal, secondVal, thirdVal))
                         }
                     }
                 }
             }
+
+            // Quran.com wordIndex is 1-based; convert cleanly to 0-based (auto-handling 0-based if ever returned)
+            val minWordPos = rawWordTriplets.minOfOrNull { it.first } ?: 1
+            val indexOffset = if (minWordPos == 0) 0 else 1
+
+            val wordSegments = ArrayList<WordTimingSegment>(rawWordTriplets.size)
+            for ((rawWordPos, segStart, segEnd) in rawWordTriplets) {
+                val zeroBased = rawWordPos - indexOffset
+                if (zeroBased >= 0) {
+                    wordSegments.add(
+                        WordTimingSegment(
+                            wordIndexZeroBased = zeroBased,
+                            startMs = segStart,
+                            endMs = segEnd
+                        )
+                    )
+                }
+            }
+
             if (wordSegments.isNotEmpty()) {
                 wordSegments.sortBy { it.startMs }
                 anyWordSegments = true
@@ -329,15 +423,15 @@ object QuranTimingRepository {
             )
         }
 
-        if (entries.isEmpty()) return null
+        if (entries.isEmpty()) return@runCatching null
         entries.sortBy { it.startMs }
 
-        return SurahTimingMap(
+        SurahTimingMap(
             reciterId = reciterId,
             surahNumber = surahNumber,
             quranComAudioUrl = audioUrl,
             ayahs = entries,
             hasWordSegments = anyWordSegments
         )
-    }
+    }.getOrNull()
 }

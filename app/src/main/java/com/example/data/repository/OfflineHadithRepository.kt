@@ -27,15 +27,56 @@ import java.util.concurrent.TimeUnit
 object OfflineHadithRepository {
 
     const val HADITH_CDN_BASE_URL = "https://cdn.jsdelivr.net/gh/fawazahmed0/hadith-api@1/editions/"
+    private const val HADITH_GITHUB_RAW_BASE_URL = "https://raw.githubusercontent.com/fawazahmed0/hadith-api/1/editions/"
     private const val META_COUNTS_FILE = "hadith_meta_counts.json"
     private const val FAVORITES_SNAPSHOT_FILE = "hadith_favorites.json"
 
     private val httpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
-            .connectTimeout(25, TimeUnit.SECONDS)
+            .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(90, TimeUnit.SECONDS)
+            .writeTimeout(30, TimeUnit.SECONDS)
+            .callTimeout(120, TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
             .retryOnConnectionFailure(true)
             .build()
+    }
+
+    /**
+     * Builds resilient candidate mirror URLs for each Hadith book so CDN hiccups or edition
+     * filename variants (`.min.json` vs `.json`) fall back seamlessly without failing the download.
+     */
+    private fun candidateDownloadUrls(book: HadithBookCollection): List<String> {
+        val editionFiles = linkedSetOf<String>().apply {
+            add(book.editionFile)
+            val unminified = book.editionFile.replace(".min.json", ".json")
+            add(unminified)
+        }
+        return buildList {
+            for (file in editionFiles) {
+                add("$HADITH_CDN_BASE_URL$file")
+                add("$HADITH_GITHUB_RAW_BASE_URL$file")
+            }
+        }.distinct()
+    }
+
+    /**
+     * Safely cleans up any leftover cached files/metadata from books removed in newer app versions
+     * (without touching any other downloaded Hadith collections or favorites).
+     */
+    fun cleanupLegacyRemovedBooks(context: Context) {
+        val removedIds = listOf("riyadussalihin")
+        for (legacyId in removedIds) {
+            runCatching {
+                val fileName = "hadith_${legacyId}.json"
+                val persistentFile = File(com.example.data.local.PersistentOfflineStorage.hadithDir(context), fileName)
+                if (persistentFile.exists()) persistentFile.delete()
+                val legacyFile = File(context.applicationContext.filesDir, fileName)
+                if (legacyFile.exists()) legacyFile.delete()
+                removeBookCount(context, legacyId)
+            }
+        }
     }
 
     // Low-RAM memory cache: cleared immediately when leaving a book/screen
@@ -124,8 +165,8 @@ object OfflineHadithRepository {
     }
 
     /**
-     * Downloads a Hadith book JSON once from jsDelivr CDN into
-     * `getFilesDir()/hadith_{bookId}.json`, reporting smooth 0f..1f progress.
+     * Downloads a Hadith book JSON once with multi-mirror fallback into
+     * `offline_hadith/hadith_{bookId}.json`, streaming directly to disk and reporting 0f..1f progress.
      */
     suspend fun downloadBookOffline(
         context: Context,
@@ -133,71 +174,105 @@ object OfflineHadithRepository {
         onProgress: (Float) -> Unit
     ): Result<List<LibraryHadith>> = withContext(Dispatchers.IO) {
         val targetFile = getLocalBookFile(context, book)
+        targetFile.parentFile?.mkdirs()
         val tmpFile = File(targetFile.parentFile, "hadith_${book.id}.json.tmp")
-        try {
-            onProgress(0.02f)
-            val url = "$HADITH_CDN_BASE_URL${book.editionFile}"
-            val req = Request.Builder()
-                .url(url)
-                .header("Accept", "application/json")
-                .build()
 
-            httpClient.newCall(req).execute().use { response ->
-                if (!response.isSuccessful) {
-                    return@withContext Result.failure(
-                        IOException("تعذّر تحميل ${book.arabicTitle} (رمز ${response.code})")
-                    )
-                }
-                val body = response.body
-                    ?: return@withContext Result.failure(IOException("استجابة فارغة من الخادم"))
+        val urls = candidateDownloadUrls(book)
+        var lastError: Throwable? = null
 
-                val contentLength = body.contentLength()
-                val totalEstimate = if (contentLength > 0L) contentLength else book.estimatedBytes
-                var bytesReadTotal = 0L
-                var lastReported = 0.02f
+        for (url in urls) {
+            try {
+                if (tmpFile.exists()) tmpFile.delete()
+                onProgress(0.02f)
 
-                BufferedInputStream(body.byteStream(), 16 * 1024).use { input ->
-                    BufferedOutputStream(FileOutputStream(tmpFile), 16 * 1024).use { output ->
-                        val buffer = ByteArray(16 * 1024)
-                        while (true) {
-                            val read = input.read(buffer)
-                            if (read == -1) break
-                            output.write(buffer, 0, read)
-                            bytesReadTotal += read
-                            val fraction = (bytesReadTotal.toFloat() / totalEstimate.toFloat())
-                                .coerceIn(0.02f, 0.86f)
-                            if (fraction - lastReported >= 0.02f) {
-                                lastReported = fraction
-                                onProgress(fraction)
+                val req = Request.Builder()
+                    .url(url)
+                    .header("Accept", "application/json")
+                    .header("User-Agent", "RafiqAlMuslim-Android")
+                    .build()
+
+                var httpFailureMsg: String? = null
+                httpClient.newCall(req).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        httpFailureMsg = "تعذّر تحميل ${book.arabicTitle} (رمز ${response.code})"
+                        return@use
+                    }
+                    val body = response.body
+                    if (body == null) {
+                        httpFailureMsg = "استجابة فارغة من الخادم"
+                        return@use
+                    }
+
+                    val contentLength = body.contentLength()
+                    val totalEstimate = if (contentLength > 0L) contentLength else book.estimatedBytes
+                    var bytesReadTotal = 0L
+                    var lastReported = 0.02f
+
+                    BufferedInputStream(body.byteStream(), 32 * 1024).use { input ->
+                        BufferedOutputStream(FileOutputStream(tmpFile), 32 * 1024).use { output ->
+                            val buffer = ByteArray(32 * 1024)
+                            while (true) {
+                                val read = input.read(buffer)
+                                if (read == -1) break
+                                output.write(buffer, 0, read)
+                                bytesReadTotal += read
+                                val fraction = (bytesReadTotal.toFloat() / totalEstimate.toFloat())
+                                    .coerceIn(0.02f, 0.86f)
+                                if (fraction - lastReported >= 0.02f) {
+                                    lastReported = fraction
+                                    onProgress(fraction)
+                                }
                             }
+                            output.flush()
                         }
-                        output.flush()
                     }
                 }
-            }
 
-            onProgress(0.90f)
-            val parsedList = parseHadithJsonFile(tmpFile, book)
-            if (parsedList.isEmpty()) {
-                tmpFile.delete()
-                return@withContext Result.failure(IOException("تعذّر قراءة ملف الحديث المحمّل"))
-            }
+                if (httpFailureMsg != null) {
+                    lastError = IOException(httpFailureMsg)
+                    continue
+                }
 
-            onProgress(0.96f)
-            if (targetFile.exists()) targetFile.delete()
-            if (!tmpFile.renameTo(targetFile)) {
-                tmpFile.copyTo(targetFile, overwrite = true)
-                tmpFile.delete()
-            }
+                if (!tmpFile.exists() || tmpFile.length() < 128L) {
+                    lastError = IOException("الملف المحمّل فارغ أو غير مكتمل")
+                    continue
+                }
 
-            memoryCache[book.id] = parsedList
-            saveBookCount(context, book.id, parsedList.size)
-            onProgress(1.0f)
-            Result.success(parsedList)
-        } catch (e: Exception) {
-            runCatching { tmpFile.delete() }
-            Result.failure(e)
+                onProgress(0.90f)
+                val parsedList = runCatching { parseHadithJsonFile(tmpFile, book) }
+                    .getOrElse { parseErr ->
+                        lastError = IOException("تعذّر تحليل بيانات ${book.arabicTitle}: ${parseErr.localizedMessage ?: "تنسيق غير صالح"}")
+                        emptyList()
+                    }
+                if (parsedList.isEmpty()) {
+                    runCatching { tmpFile.delete() }
+                    if (lastError == null) {
+                        lastError = IOException("لم يُعثر على أحاديث صالحة داخل ملف ${book.arabicTitle}")
+                    }
+                    continue
+                }
+
+                onProgress(0.96f)
+                if (targetFile.exists()) targetFile.delete()
+                if (!tmpFile.renameTo(targetFile)) {
+                    tmpFile.copyTo(targetFile, overwrite = true)
+                    tmpFile.delete()
+                }
+
+                memoryCache[book.id] = parsedList
+                saveBookCount(context, book.id, parsedList.size)
+                onProgress(1.0f)
+                return@withContext Result.success(parsedList)
+            } catch (e: Exception) {
+                runCatching { tmpFile.delete() }
+                lastError = e
+            }
         }
+
+        runCatching { tmpFile.delete() }
+        Result.failure(
+            lastError ?: IOException("تعذّر تحميل ${book.arabicTitle}، يرجى المحاولة مجدداً")
+        )
     }
 
     /**
@@ -245,7 +320,9 @@ object OfflineHadithRepository {
 
     /**
      * Streaming JsonReader parser for fawazahmed0/hadith-api JSON files.
-     * Handles large 7,500+ Hadith collections (e.g., Sahih Bukhari) fast and with minimal RAM.
+     * Tolerates both root objects (`{metadata, hadiths}`) and root arrays,
+     * handles null/missing fields gracefully, and preserves duplicate hadith numbers
+     * with unique UID suffixes.
      */
     private fun parseHadithJsonFile(file: File, book: HadithBookCollection): List<LibraryHadith> {
         val sectionsMap = HashMap<String, String>()
@@ -254,16 +331,23 @@ object OfflineHadithRepository {
         InputStreamReader(BufferedInputStream(FileInputStream(file), 32 * 1024), Charsets.UTF_8).use { isr ->
             JsonReader(isr).use { reader ->
                 reader.isLenient = true
-                if (reader.peek() != JsonToken.BEGIN_OBJECT) return emptyList()
-                reader.beginObject()
-                while (reader.hasNext()) {
-                    when (reader.nextName()) {
-                        "metadata" -> readMetadataSections(reader, sectionsMap)
-                        "hadiths" -> readHadithsArray(reader, rawEntries)
-                        else -> reader.skipValue()
+                when (reader.peek()) {
+                    JsonToken.BEGIN_OBJECT -> {
+                        reader.beginObject()
+                        while (reader.hasNext()) {
+                            when (reader.nextName()) {
+                                "metadata" -> readMetadataSections(reader, sectionsMap)
+                                "hadiths", "data", "items" -> readHadithsArray(reader, rawEntries)
+                                else -> reader.skipValue()
+                            }
+                        }
+                        reader.endObject()
                     }
+                    JsonToken.BEGIN_ARRAY -> {
+                        readHadithsArray(reader, rawEntries)
+                    }
+                    else -> return emptyList()
                 }
-                reader.endObject()
             }
         }
 
@@ -275,8 +359,12 @@ object OfflineHadithRepository {
             val cleanedText = raw.text.trim()
             if (cleanedText.isEmpty()) return@forEachIndexed
             val num = if (raw.hadithNumber > 0) raw.hadithNumber else (idx + 1)
-            val uid = "${book.id}_$num"
-            if (!seenUids.add(uid)) return@forEachIndexed
+            var uid = "${book.id}_$num"
+            if (!seenUids.add(uid)) {
+                // Preserve multi-part or duplicate-numbered narrations with unique UID suffixes
+                uid = "${book.id}_${num}_$idx"
+                seenUids.add(uid)
+            }
 
             val sectionName = raw.sectionBookKey?.let { sectionsMap[it] }.orEmpty().trim()
             val enrichment = offlineEnrichment[num]
@@ -356,12 +444,16 @@ object OfflineHadithRepository {
             reader.beginObject()
             while (reader.hasNext()) {
                 when (reader.nextName()) {
-                    "hadithnumber" -> hadithNum = readLenientInt(reader)
+                    "hadithnumber", "number", "id" -> {
+                        val v = readLenientInt(reader)
+                        if (hadithNum == 0 && v > 0) hadithNum = v
+                    }
                     "arabicnumber" -> arabicNum = readLenientInt(reader)
-                    "text" -> {
-                        text = if (reader.peek() == JsonToken.STRING) reader.nextString() else {
+                    "text", "arab", "arabic" -> {
+                        val candidate = if (reader.peek() == JsonToken.STRING) reader.nextString() else {
                             reader.skipValue(); ""
                         }
+                        if (text.isBlank() && candidate.isNotBlank()) text = candidate
                     }
                     "reference" -> {
                         if (reader.peek() == JsonToken.BEGIN_OBJECT) {
@@ -370,7 +462,7 @@ object OfflineHadithRepository {
                                 when (reader.nextName()) {
                                     "book" -> {
                                         refBook = when (reader.peek()) {
-                                            JsonToken.NUMBER -> reader.nextDouble().toInt().toString()
+                                            JsonToken.NUMBER -> runCatching { reader.nextDouble().toInt().toString() }.getOrNull()
                                             JsonToken.STRING -> reader.nextString()
                                             else -> { reader.skipValue(); null }
                                         }
@@ -399,7 +491,12 @@ object OfflineHadithRepository {
     private fun readLenientInt(reader: JsonReader): Int {
         return when (reader.peek()) {
             JsonToken.NUMBER -> runCatching { reader.nextDouble().toInt() }.getOrDefault(0)
-            JsonToken.STRING -> runCatching { reader.nextString().toDouble().toInt() }.getOrDefault(0)
+            JsonToken.STRING -> runCatching {
+                val raw = reader.nextString().trim()
+                raw.toDoubleOrNull()?.toInt()
+                    ?: Regex("\\d+").find(raw)?.value?.toIntOrNull()
+                    ?: 0
+            }.getOrDefault(0)
             else -> {
                 reader.skipValue()
                 0

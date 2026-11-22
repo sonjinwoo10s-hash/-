@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Pause
@@ -71,7 +72,9 @@ fun StickyQuranMiniPlayer(
     onDownloadMp3: () -> Unit,
     onOpenReciterLibrary: () -> Unit,
     onDismiss: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    isCurrentSurahDownloaded: Boolean = false,
+    isCurrentSurahDownloading: Boolean = false
 ) {
     val surahNum = audioState.loadedSurahNumber ?: return
     val view = LocalView.current
@@ -122,7 +125,8 @@ fun StickyQuranMiniPlayer(
                         Text(
                             text = buildString {
                                 append(audioState.selectedReciter.arabicName)
-                                if (audioState.isBuffering) append(" • جاري التحميل...")
+                                if (audioState.isPlayingOffline || isCurrentSurahDownloaded) append(" • أوفلاين ✓")
+                                else if (audioState.isBuffering) append(" • جاري التحميل...")
                                 else if (audioState.usedFallbackStream && audioState.isPlaying) append(" • بث بديل")
                             },
                             style = MaterialTheme.typography.labelSmall,
@@ -178,12 +182,25 @@ fun StickyQuranMiniPlayer(
                             .size(40.dp)
                             .testTag("mini_player_download_button")
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Download,
-                            contentDescription = "تحميل السورة MP3",
-                            tint = Color(0xFFF6DC97),
-                            modifier = Modifier.size(20.dp)
-                        )
+                        when {
+                            isCurrentSurahDownloading -> CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp,
+                                color = Color(0xFFF6DC97)
+                            )
+                            isCurrentSurahDownloaded || audioState.isPlayingOffline -> Icon(
+                                imageVector = Icons.Default.CheckCircle,
+                                contentDescription = "تم تحميل السورة أوفلاين",
+                                tint = Color(0xFF4ADE80),
+                                modifier = Modifier.size(20.dp)
+                            )
+                            else -> Icon(
+                                imageVector = Icons.Default.Download,
+                                contentDescription = "تحميل السورة MP3",
+                                tint = Color(0xFFF6DC97),
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
                     }
 
                     IconButton(

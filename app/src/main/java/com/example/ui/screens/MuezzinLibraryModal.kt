@@ -106,6 +106,8 @@ fun MuezzinLibraryModal(
     defaultMuezzinId: String,
     fajrMuezzinId: String,
     useDedicatedFajrAdhan: Boolean,
+    perPrayerMuezzinEnabled: Boolean,
+    perPrayerMuezzinIds: Map<String, String>,
     favoriteIds: Set<String>,
     adhanState: AdhanPlayerState,
     isSyncingRepo: Boolean,
@@ -122,6 +124,8 @@ fun MuezzinLibraryModal(
     onSetDefaultMuezzin: (MuezzinItem) -> Unit,
     onSetFajrMuezzin: (MuezzinItem) -> Unit,
     onToggleDedicatedFajr: (Boolean) -> Unit,
+    onTogglePerPrayerMuezzin: (Boolean) -> Unit,
+    onSetMuezzinForPrayer: (prayerKey: String, muezzin: MuezzinItem) -> Unit,
     onAddCustomFromUrl: (name: String, url: String, isFajr: Boolean) -> Unit,
     onAddCustomFromFile: (name: String, uri: Uri, isFajr: Boolean) -> Unit,
     onOverrideAudioWithUrl: (muezzin: MuezzinItem, newUrl: String) -> Unit,
@@ -135,6 +139,7 @@ fun MuezzinLibraryModal(
     var searchQuery by remember { mutableStateOf("") }
     var debouncedQuery by remember { mutableStateOf("") }
     var selectedRegion by remember { mutableStateOf(MuezzinRegion.ALL) }
+    var selectedTargetPrayerKey by remember { mutableStateOf("Fajr") }
     var showAddDialog by remember { mutableStateOf(false) }
     var editingAudioMuezzin by remember { mutableStateOf<MuezzinItem?>(null) }
 
@@ -470,8 +475,108 @@ fun MuezzinLibraryModal(
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Column {
                                     Text(
-                                        text = "أذان الفجر المخصص (الصلاة خير من النوم)",
+                                        text = "تخصيص مؤذن مختلف لكل صلاة",
                                         style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        text = if (perPrayerMuezzinEnabled) {
+                                            "اختر الصلاة بالأسفل ثم عيّن مؤذنها"
+                                        } else {
+                                            "مؤذن موحّد لجميع الصلوات الخمس"
+                                        },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = islamic.textMuted,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                            Switch(
+                                checked = perPrayerMuezzinEnabled,
+                                onCheckedChange = onTogglePerPrayerMuezzin,
+                                modifier = Modifier.testTag("per_prayer_muezzin_switch")
+                            )
+                        }
+
+                        AnimatedVisibility(visible = perPrayerMuezzinEnabled) {
+                            val prayerTabs = listOf(
+                                "Fajr" to "الفجر",
+                                "Dhuhr" to "الظهر",
+                                "Asr" to "العصر",
+                                "Maghrib" to "المغرب",
+                                "Isha" to "العشاء"
+                            )
+                            val assignedIdForTarget = perPrayerMuezzinIds[selectedTargetPrayerKey] ?: defaultMuezzinId
+                            val assignedNameForTarget = allMuezzins.find { it.id == assignedIdForTarget }?.name
+                                ?: activeDefaultMuezzin?.name
+                                ?: "غير محدد"
+                            val targetArabic = prayerTabs.find { it.first == selectedTargetPrayerKey }?.second ?: "الفجر"
+
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 8.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                ) {
+                                    prayerTabs.forEach { (pKey, pLabel) ->
+                                        val isTabSelected = selectedTargetPrayerKey == pKey
+                                        Surface(
+                                            shape = RoundedCornerShape(10.dp),
+                                            color = if (isTabSelected) MaterialTheme.colorScheme.primary else islamic.cardAlt,
+                                            border = BorderStroke(
+                                                1.dp,
+                                                if (isTabSelected) MaterialTheme.colorScheme.primary else islamic.border
+                                            ),
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .clip(RoundedCornerShape(10.dp))
+                                                .clickable { selectedTargetPrayerKey = pKey }
+                                                .testTag("per_prayer_pill_$pKey")
+                                        ) {
+                                            Text(
+                                                text = pLabel,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (isTabSelected) Color.White else MaterialTheme.colorScheme.onSurface,
+                                                maxLines = 1,
+                                                modifier = Modifier.padding(vertical = 7.dp, horizontal = 4.dp),
+                                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                                            )
+                                        }
+                                    }
+                                }
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text(
+                                    text = "مؤذن صلاة $targetArabic الحالي: $assignedNameForTarget",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+
+                        if (!perPrayerMuezzinEnabled) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(islamic.cardAlt)
+                                    .padding(horizontal = 10.dp, vertical = 4.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "أذان الفجر المخصص (الصلاة خير من النوم)",
+                                        style = MaterialTheme.typography.labelSmall,
                                         fontWeight = FontWeight.Bold,
                                         color = MaterialTheme.colorScheme.onSurface
                                     )
@@ -485,12 +590,12 @@ fun MuezzinLibraryModal(
                                         )
                                     }
                                 }
+                                Switch(
+                                    checked = useDedicatedFajrAdhan,
+                                    onCheckedChange = onToggleDedicatedFajr,
+                                    modifier = Modifier.testTag("dedicated_fajr_switch")
+                                )
                             }
-                            Switch(
-                                checked = useDedicatedFajrAdhan,
-                                onCheckedChange = onToggleDedicatedFajr,
-                                modifier = Modifier.testTag("dedicated_fajr_switch")
-                            )
                         }
                     }
                 }
@@ -644,18 +749,35 @@ fun MuezzinLibraryModal(
                                         }
                                     }
                                 }
+                                val targetPrayerArabic = when (selectedTargetPrayerKey) {
+                                    "Fajr" -> "الفجر"
+                                    "Dhuhr" -> "الظهر"
+                                    "Asr" -> "العصر"
+                                    "Maghrib" -> "المغرب"
+                                    "Isha" -> "العشاء"
+                                    else -> "الفجر"
+                                }
                                 items(regionMuezzins, key = { it.id }) { muezzin ->
+                                    val isAssignedToTarget = perPrayerMuezzinIds[selectedTargetPrayerKey] == muezzin.id
                                     MuezzinCard(
                                         muezzin = muezzin,
-                                        isDefault = muezzin.id == defaultMuezzinId,
+                                        isDefault = if (perPrayerMuezzinEnabled) isAssignedToTarget else muezzin.id == defaultMuezzinId,
                                         isFajrDefault = muezzin.id == fajrMuezzinId,
+                                        perPrayerMode = perPrayerMuezzinEnabled,
+                                        targetPrayerArabic = targetPrayerArabic,
                                         isFavorite = favoriteIds.contains(muezzin.id),
                                         isCachedOffline = cachedAdhanIds.contains(muezzin.id),
                                         isDownloadingOffline = downloadingMuezzinIds.contains(muezzin.id),
                                         adhanState = adhanState,
                                         onTogglePreview = { onTogglePreview(muezzin) },
                                         onToggleFavorite = { onToggleFavorite(muezzin.id) },
-                                        onSetDefault = { onSetDefaultMuezzin(muezzin) },
+                                        onSetDefault = {
+                                            if (perPrayerMuezzinEnabled) {
+                                                onSetMuezzinForPrayer(selectedTargetPrayerKey, muezzin)
+                                            } else {
+                                                onSetDefaultMuezzin(muezzin)
+                                            }
+                                        },
                                         onSetFajr = { onSetFajrMuezzin(muezzin) },
                                         onDownloadOffline = { onDownloadOffline(muezzin) },
                                         onEditAudio = { editingAudioMuezzin = muezzin },
@@ -664,18 +786,35 @@ fun MuezzinLibraryModal(
                                 }
                             }
                         } else {
+                            val targetPrayerArabic = when (selectedTargetPrayerKey) {
+                                "Fajr" -> "الفجر"
+                                "Dhuhr" -> "الظهر"
+                                "Asr" -> "العصر"
+                                "Maghrib" -> "المغرب"
+                                "Isha" -> "العشاء"
+                                else -> "الفجر"
+                            }
                             items(pagedMuezzins, key = { it.id }) { muezzin ->
+                                val isAssignedToTarget = perPrayerMuezzinIds[selectedTargetPrayerKey] == muezzin.id
                                 MuezzinCard(
                                     muezzin = muezzin,
-                                    isDefault = muezzin.id == defaultMuezzinId,
+                                    isDefault = if (perPrayerMuezzinEnabled) isAssignedToTarget else muezzin.id == defaultMuezzinId,
                                     isFajrDefault = muezzin.id == fajrMuezzinId,
+                                    perPrayerMode = perPrayerMuezzinEnabled,
+                                    targetPrayerArabic = targetPrayerArabic,
                                     isFavorite = favoriteIds.contains(muezzin.id),
                                     isCachedOffline = cachedAdhanIds.contains(muezzin.id),
                                     isDownloadingOffline = downloadingMuezzinIds.contains(muezzin.id),
                                     adhanState = adhanState,
                                     onTogglePreview = { onTogglePreview(muezzin) },
                                     onToggleFavorite = { onToggleFavorite(muezzin.id) },
-                                    onSetDefault = { onSetDefaultMuezzin(muezzin) },
+                                    onSetDefault = {
+                                        if (perPrayerMuezzinEnabled) {
+                                            onSetMuezzinForPrayer(selectedTargetPrayerKey, muezzin)
+                                        } else {
+                                            onSetDefaultMuezzin(muezzin)
+                                        }
+                                    },
                                     onSetFajr = { onSetFajrMuezzin(muezzin) },
                                     onDownloadOffline = { onDownloadOffline(muezzin) },
                                     onEditAudio = { editingAudioMuezzin = muezzin },
@@ -851,6 +990,8 @@ private fun MuezzinCard(
     muezzin: MuezzinItem,
     isDefault: Boolean,
     isFajrDefault: Boolean,
+    perPrayerMode: Boolean,
+    targetPrayerArabic: String,
     isFavorite: Boolean,
     isCachedOffline: Boolean,
     isDownloadingOffline: Boolean,
@@ -1143,31 +1284,41 @@ private fun MuezzinCard(
                     if (isDefault) {
                         Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(4.dp))
-                        Text("الأذان الافتراضي", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                        Text(
+                            text = if (perPrayerMode) "مؤذن $targetPrayerArabic" else "الأذان الافتراضي",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold
+                        )
                     } else {
-                        Text("تعيين كأذان افتراضي", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                        Text(
+                            text = if (perPrayerMode) "تعيين لصلاة $targetPrayerArabic" else "تعيين كأذان افتراضي",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold
+                        )
                     }
                 }
 
-                OutlinedButton(
-                    onClick = onSetFajr,
-                    shape = RoundedCornerShape(10.dp),
-                    border = BorderStroke(
-                        1.dp,
-                        if (isFajrDefault) islamic.gold else islamic.border
-                    ),
-                    colors = ButtonDefaults.outlinedButtonColors(
-                        containerColor = if (isFajrDefault) islamic.goldSoft else Color.Transparent,
-                        contentColor = if (isFajrDefault) islamic.goldText else islamic.textMuted
-                    ),
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
-                    modifier = Modifier.testTag("muezzin_set_fajr_${muezzin.id}")
-                ) {
-                    Text(
-                        text = if (isFajrDefault) "أذان الفجر ✓" else "تعيين للفجر",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold
-                    )
+                if (!perPrayerMode) {
+                    OutlinedButton(
+                        onClick = onSetFajr,
+                        shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(
+                            1.dp,
+                            if (isFajrDefault) islamic.gold else islamic.border
+                        ),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = if (isFajrDefault) islamic.goldSoft else Color.Transparent,
+                            contentColor = if (isFajrDefault) islamic.goldText else islamic.textMuted
+                        ),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                        modifier = Modifier.testTag("muezzin_set_fajr_${muezzin.id}")
+                    ) {
+                        Text(
+                            text = if (isFajrDefault) "أذان الفجر ✓" else "تعيين للفجر",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
             }
 

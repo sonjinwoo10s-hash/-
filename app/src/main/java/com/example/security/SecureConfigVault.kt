@@ -88,6 +88,9 @@ object SecureConfigVault {
     val recitersEndpoint: String
         get() = "${String(encHostGithubRaw)}/${String(encOwnerRepo)}/main/reciters.json"
 
+    val alertsEndpoint: String
+        get() = "${String(encHostGithubRaw)}/${String(encOwnerRepo)}/main/alerts.json"
+
     val latestReleaseApiEndpoint: String
         get() = "${String(encHostGithubApi)}/repos/${String(encOwnerRepo)}/releases/latest"
 

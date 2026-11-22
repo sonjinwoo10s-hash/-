@@ -9,6 +9,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.TimeUnit
 
@@ -50,13 +51,24 @@ object MuezzinRepository {
         com.example.data.local.PersistentOfflineStorage.adhanDir(context)
 
     /**
-     * Returns the exact offline cached MP3 file path: `getFilesDir()/offline_adhan/{id}.mp3`.
+     * Returns the exact offline cached MP3 file path: `offline_adhan/adhan_{id}.mp3`.
+     * Seamlessly migrates legacy `{id}.mp3` files from earlier versions so users keep cached files.
      */
     fun getCachedAdhanFile(context: Context, muezzinId: String): File {
         val safeId = sanitizeId(muezzinId)
-        val target = File(getAdhanCacheDir(context), "$safeId.mp3")
-        val legacy = File(File(context.applicationContext.filesDir, ADHAN_CACHE_DIR), "$safeId.mp3")
-        return com.example.data.local.PersistentOfflineStorage.migrateFileIfNeeded(legacy, target)
+        val dir = getAdhanCacheDir(context)
+        val target = File(dir, "adhan_$safeId.mp3")
+        val legacySameDir = File(dir, "$safeId.mp3")
+        val legacyOldDir = File(File(context.applicationContext.filesDir, ADHAN_CACHE_DIR), "$safeId.mp3")
+        if (!target.exists() || target.length() == 0L) {
+            if (legacySameDir.exists() && legacySameDir.length() > 0L) {
+                return com.example.data.local.PersistentOfflineStorage.migrateFileIfNeeded(legacySameDir, target)
+            }
+            if (legacyOldDir.exists() && legacyOldDir.length() > 0L) {
+                return com.example.data.local.PersistentOfflineStorage.migrateFileIfNeeded(legacyOldDir, target)
+            }
+        }
+        return target
     }
 
     fun isAdhanCached(context: Context, muezzinId: String): Boolean {
@@ -72,9 +84,10 @@ object MuezzinRepository {
             legacyDir.listFiles()
                 ?.filter { it.isFile && it.extension.equals("mp3", ignoreCase = true) && it.length() > 0L }
                 ?.forEach { legacy ->
+                    val baseName = legacy.nameWithoutExtension.removePrefix("adhan_")
                     com.example.data.local.PersistentOfflineStorage.migrateFileIfNeeded(
                         legacy,
-                        File(newDir, legacy.name)
+                        File(newDir, "adhan_$baseName.mp3")
                     )
                 }
         }
@@ -82,7 +95,10 @@ object MuezzinRepository {
         return newDir.listFiles()
             ?.asSequence()
             ?.filter { it.isFile && it.extension.equals("mp3", ignoreCase = true) && it.length() > 0L }
-            ?.map { it.nameWithoutExtension }
+            ?.map { file ->
+                val rawName = file.nameWithoutExtension
+                if (rawName.startsWith("adhan_")) rawName.removePrefix("adhan_") else rawName
+            }
             ?.toSet()
             .orEmpty()
     }
@@ -90,8 +106,10 @@ object MuezzinRepository {
     fun deleteCachedAdhan(context: Context, muezzinId: String) {
         if (muezzinId.isBlank()) return
         runCatching {
-            val file = getCachedAdhanFile(context, muezzinId)
-            if (file.exists()) file.delete()
+            val safeId = sanitizeId(muezzinId)
+            val dir = getAdhanCacheDir(context)
+            File(dir, "adhan_$safeId.mp3").takeIf { it.exists() }?.delete()
+            File(dir, "$safeId.mp3").takeIf { it.exists() }?.delete()
         }
     }
 
@@ -203,48 +221,62 @@ object MuezzinRepository {
      * plus optional `subtitle` (String).
      */
     fun parseMuezzinJsonArray(rawJson: String): List<MuezzinItem> {
-        val trimmed = rawJson.trim()
-        if (trimmed.isEmpty()) return emptyList()
-        val jsonArray = JSONArray(trimmed)
-        val result = mutableListOf<MuezzinItem>()
-        val seenIds = mutableSetOf<String>()
-
-        for (i in 0 until jsonArray.length()) {
-            val obj = jsonArray.optJSONObject(i) ?: continue
-            val id = obj.optString("id", "").trim()
-            val name = obj.optString("name", "").trim()
-            val rawRegion = obj.optString("region", "").trim()
-            val isFajr = obj.optBoolean("isFajr", false)
-            val url = obj.optString("url", "").trim()
-            val optionalSubtitle = obj.optString("subtitle", "").trim()
-
-            if (id.isEmpty() || name.isEmpty()) continue
-            if (!seenIds.add(id)) continue
-
-            val mappedRegion = mapRegionToEnum(rawRegion, isFajr)
-            val subtitle = when {
-                optionalSubtitle.isNotEmpty() -> optionalSubtitle
-                rawRegion.isNotEmpty() && rawRegion != mappedRegion.name -> {
-                    if (isFajr) "أذان الفجر • $rawRegion" else rawRegion
+        return runCatching {
+            val trimmed = rawJson.trim()
+            if (trimmed.isEmpty()) return@runCatching emptyList()
+            val jsonArray = when {
+                trimmed.startsWith("[") -> JSONArray(trimmed)
+                trimmed.startsWith("{") -> {
+                    val root = JSONObject(trimmed)
+                    root.optJSONArray("muezzins")
+                        ?: root.optJSONArray("data")
+                        ?: root.optJSONArray("items")
+                        ?: return@runCatching emptyList()
                 }
-                isFajr -> "أذان الفجر — الصلاة خير من النوم"
-                else -> mappedRegion.label
+                else -> return@runCatching emptyList()
             }
+            val result = mutableListOf<MuezzinItem>()
+            val seenIds = mutableSetOf<String>()
 
-            result.add(
-                MuezzinItem(
-                    id = id,
-                    name = name,
-                    subtitle = subtitle,
-                    region = mappedRegion.name,
-                    primaryUrl = url,
-                    fallbackUrls = emptyList(),
-                    isFajr = isFajr || mappedRegion == MuezzinRegion.FAJR,
-                    isCustom = false
-                )
-            )
-        }
-        return result
+            for (i in 0 until jsonArray.length()) {
+                runCatching {
+                    val obj = jsonArray.optJSONObject(i) ?: return@runCatching
+                    val id = obj.optString("id", "").trim()
+                    val name = obj.optString("name", "").trim()
+                    val rawRegion = obj.optString("region", "").trim()
+                    val isFajr = obj.optBoolean("isFajr", false)
+                    val url = obj.optString("url", "").trim()
+                    val optionalSubtitle = obj.optString("subtitle", "").trim()
+
+                    if (id.isEmpty() || name.isEmpty()) return@runCatching
+                    if (!seenIds.add(id)) return@runCatching
+
+                    val mappedRegion = mapRegionToEnum(rawRegion, isFajr)
+                    val subtitle = when {
+                        optionalSubtitle.isNotEmpty() -> optionalSubtitle
+                        rawRegion.isNotEmpty() && rawRegion != mappedRegion.name -> {
+                            if (isFajr) "أذان الفجر • $rawRegion" else rawRegion
+                        }
+                        isFajr -> "أذان الفجر — الصلاة خير من النوم"
+                        else -> mappedRegion.label
+                    }
+
+                    result.add(
+                        MuezzinItem(
+                            id = id,
+                            name = name,
+                            subtitle = subtitle,
+                            region = mappedRegion.name,
+                            primaryUrl = url,
+                            fallbackUrls = emptyList(),
+                            isFajr = isFajr || mappedRegion == MuezzinRegion.FAJR,
+                            isCustom = false
+                        )
+                    )
+                }
+            }
+            result
+        }.getOrDefault(emptyList())
     }
 
     private fun mapRegionToEnum(rawRegion: String, isFajr: Boolean): MuezzinRegion {

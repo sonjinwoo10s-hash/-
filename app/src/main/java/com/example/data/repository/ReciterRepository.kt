@@ -89,7 +89,7 @@ object ReciterRepository {
         }
     }
 
-    private fun parseRecitersJson(raw: String): List<ReciterOption> {
+    private fun parseRecitersJson(raw: String): List<ReciterOption> = runCatching {
         val trimmed = raw.trim()
         val array: JSONArray = when {
             trimmed.startsWith("[") -> JSONArray(trimmed)
@@ -104,33 +104,35 @@ object ReciterRepository {
 
         val list = ArrayList<ReciterOption>(array.length())
         for (i in 0 until array.length()) {
-            val obj = array.optJSONObject(i) ?: continue
-            val id = obj.optString("id", "").trim().ifBlank { "repo_reciter_$i" }
-            val name = obj.optString("name", "").trim()
-            val riwaya = obj.optString("riwaya", obj.optString("riwayah", "حفص عن عاصم")).trim()
-                .ifBlank { "حفص عن عاصم" }
-            val serverRaw = obj.optString("server", "").trim()
-            if (name.isBlank() || serverRaw.isBlank()) continue
-            val normalizedServer = if (serverRaw.endsWith("/")) serverRaw else "$serverRaw/"
+            runCatching {
+                val obj = array.optJSONObject(i) ?: return@runCatching
+                val id = obj.optString("id", "").trim().ifBlank { "repo_reciter_$i" }
+                val name = obj.optString("name", "").trim()
+                val riwaya = obj.optString("riwaya", obj.optString("riwayah", "حفص عن عاصم")).trim()
+                    .ifBlank { "حفص عن عاصم" }
+                val serverRaw = obj.optString("server", "").trim()
+                if (name.isBlank() || serverRaw.isBlank()) return@runCatching
+                val normalizedServer = if (serverRaw.endsWith("/")) serverRaw else "$serverRaw/"
 
-            list.add(
-                ReciterOption(
-                    id = id,
-                    arabicName = name,
-                    riwayahName = riwaya,
-                    serverUrl = normalizedServer,
-                    moshafList = listOf(
-                        MoshafOption(
-                            id = i + 1,
-                            name = riwaya,
-                            server = normalizedServer,
-                            surahTotal = 114
-                        )
-                    ),
-                    isFeatured = false
+                list.add(
+                    ReciterOption(
+                        id = id,
+                        arabicName = name,
+                        riwayahName = riwaya,
+                        serverUrl = normalizedServer,
+                        moshafList = listOf(
+                            MoshafOption(
+                                id = i + 1,
+                                name = riwaya,
+                                server = normalizedServer,
+                                surahTotal = 114
+                            )
+                        ),
+                        isFeatured = false
+                    )
                 )
-            )
+            }
         }
-        return list
-    }
+        list
+    }.getOrDefault(emptyList())
 }

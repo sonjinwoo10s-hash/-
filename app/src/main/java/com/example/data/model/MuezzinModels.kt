@@ -16,11 +16,11 @@ enum class MuezzinRegion(val label: String) {
 
 @JsonClass(generateAdapter = true)
 data class MuezzinItem(
-    val id: String,
-    val name: String,
-    val subtitle: String,
-    val region: String, // MuezzinRegion.name
-    val primaryUrl: String,
+    val id: String = "",
+    val name: String = "",
+    val subtitle: String = "",
+    val region: String = MuezzinRegion.CUSTOM.name, // MuezzinRegion.name
+    val primaryUrl: String = "",
     val fallbackUrls: List<String> = emptyList(),
     val localFilePath: String? = null,
     val isFajr: Boolean = false,
@@ -40,7 +40,7 @@ data class MuezzinItem(
 
 @JsonClass(generateAdapter = true)
 data class MuezzinAudioOverride(
-    val muezzinId: String,
+    val muezzinId: String = "",
     val customUrl: String? = null,
     val localFilePath: String? = null,
     val localFileName: String? = null

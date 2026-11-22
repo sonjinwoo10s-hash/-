@@ -23,7 +23,9 @@
 -keep public class com.example.PermissionsOnboardingActivity
 -keep public class com.example.service.** extends android.app.Service { *; }
 -keep public class com.example.receiver.** extends android.content.BroadcastReceiver { *; }
+-keep public class com.example.widget.** extends android.appwidget.AppWidgetProvider { *; }
 -keep class androidx.core.content.FileProvider { *; }
+-keep class androidx.datastore.** { *; }
 
 # 4. Preserve Moshi JSON models & generated adapters so serialization never breaks
 -keepattributes RuntimeVisibleAnnotations,Signature,InnerClasses,EnclosingMethod

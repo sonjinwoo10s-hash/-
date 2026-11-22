@@ -32,7 +32,12 @@ data class AyahAudioState(
     val activeReciterName: String = "",
     val fallbackNote: String? = null,
     val errorMessage: String? = null
-)
+) {
+    val activeVerseKey: String?
+        get() = if (surahNumber != null && ayahNumber != null && (isPlaying || isBuffering)) {
+            "$surahNumber:$ayahNumber"
+        } else null
+}
 
 object EveryAyahMapper {
 
@@ -43,26 +48,36 @@ object EveryAyahMapper {
             "featured_alafasy" -> return "Alafasy_128kbps"
             "featured_maher" -> return "MaherAlMuaiqly128kbps"
             "featured_basit_murattal" -> return "Abdul_Basit_Murattal_192kbps"
-            "featured_basit_mujawwad" -> return "Abdul_Basit_Murattal_192kbps"
+            "featured_basit_mujawwad" -> return "Abdul_Basit_Mujawwad_128kbps"
             "featured_minshawi" -> return "Minshawy_Murattal_128kbps"
             "featured_husary" -> return "Husary_128kbps"
             "featured_qatami" -> return "Nasser_Alqatami_128kbps"
             "featured_sudais" -> return "Abdurrahmaan_As-Sudais_192kbps"
             "featured_ghamdi" -> return "Ghamadi_40kbps"
+            "featured_shuraim" -> return "Saood_ash-Shuraym_128kbps"
+            "featured_shatri" -> return "Abu_Bakr_Ash-Shaatree_128kbps"
+            "featured_rifai" -> return "Hani_Rifai_192kbps"
         }
 
         // Also match by normalized Arabic name (supports reciters chosen from MP3Quran API search)
         val norm = OfflineIslamicData.normalizeArabic(reciter.arabicName)
+        val riwayahNorm = OfflineIslamicData.normalizeArabic(reciter.riwayahName)
         return when {
             norm.contains("ياسر الدوسري") -> "Yasser_Ad-Dussary_128kbps"
             norm.contains("العفاسي") -> "Alafasy_128kbps"
             norm.contains("ماهر المعيقلي") -> "MaherAlMuaiqly128kbps"
-            norm.contains("عبد الباسط") || norm.contains("عبدالباسط") -> "Abdul_Basit_Murattal_192kbps"
+            norm.contains("عبد الباسط") || norm.contains("عبدالباسط") -> {
+                if (riwayahNorm.contains("مجود")) "Abdul_Basit_Mujawwad_128kbps" else "Abdul_Basit_Murattal_192kbps"
+            }
             norm.contains("المنشاوي") -> "Minshawy_Murattal_128kbps"
             norm.contains("الحصري") -> "Husary_128kbps"
             norm.contains("القطامي") -> "Nasser_Alqatami_128kbps"
             norm.contains("السديس") -> "Abdurrahmaan_As-Sudais_192kbps"
+            norm.contains("الشريم") -> "Saood_ash-Shuraym_128kbps"
+            norm.contains("الشاطري") -> "Abu_Bakr_Ash-Shaatree_128kbps"
+            norm.contains("الرفاعي") -> "Hani_Rifai_192kbps"
             norm.contains("الغامدي") -> "Ghamadi_40kbps"
+            norm.contains("العجمي") -> "Ahmed_ibn_Ali_al-Ajamy_128kbps_ketaballah.net"
             else -> null
         }
     }
@@ -169,14 +184,20 @@ class AyahAudioPlayer(private val scope: CoroutineScope) {
             return
         }
 
-        playAyah(surahNumber, ayah, reciter, onAdvanceToNextAyah)
+        playAyah(
+            surahNumber = surahNumber,
+            ayah = ayah,
+            reciter = reciter,
+            onAdvanceToNextAyah = onAdvanceToNextAyah
+        )
     }
 
     fun playAyah(
         surahNumber: Int,
         ayah: AyahItem,
         reciter: ReciterOption,
-        onAdvanceToNextAyah: (nextAyahNumber: Int) -> Unit
+        continueReading: Boolean? = null,
+        onAdvanceToNextAyah: (nextAyahNumber: Int) -> Unit = {}
     ) {
         onAdvanceCallback = onAdvanceToNextAyah
         val token = ++sessionToken
@@ -211,10 +232,11 @@ class AyahAudioPlayer(private val scope: CoroutineScope) {
                 surahNumber = surahNumber,
                 ayahNumber = ayah.numberInSurah,
                 globalAyahNumber = ayah.globalNumber,
-                activeWordIndex = 0,
+                activeWordIndex = null,
                 isPlaying = false,
                 isBuffering = true,
                 currentRepeatIndex = 1,
+                continueReading = continueReading ?: it.continueReading,
                 activeReciterName = if (folder != null) reciter.arabicName else "مشاري راشد العفاسي (بديل)",
                 fallbackNote = initialFallbackNote,
                 errorMessage = null
@@ -283,12 +305,12 @@ class AyahAudioPlayer(private val scope: CoroutineScope) {
                     preparedKey = targetKey
                     player.start()
                     applySpeed(player)
-                    startWordSyncTicker()
+                    // Highlight the active Ayah cleanly without guessing word offsets (no segments available here)
                     _state.update {
                         it.copy(
                             isBuffering = false,
                             isPlaying = true,
-                            activeWordIndex = 0,
+                            activeWordIndex = null,
                             fallbackNote = if (fellBackFromPrimary) {
                                 "تم استخدام بث بديل للآية بصوت الشيخ مشاري العفاسي"
                             } else {
@@ -306,7 +328,7 @@ class AyahAudioPlayer(private val scope: CoroutineScope) {
                         else -> current.currentRepeatIndex < current.repeatMode.repeatCount
                     }
                     if (shouldRepeat) {
-                        _state.update { it.copy(currentRepeatIndex = it.currentRepeatIndex + 1, isPlaying = true, activeWordIndex = 0) }
+                        _state.update { it.copy(currentRepeatIndex = it.currentRepeatIndex + 1, isPlaying = true, activeWordIndex = null) }
                         runCatching {
                             player.seekTo(0)
                             player.start()
@@ -318,7 +340,14 @@ class AyahAudioPlayer(private val scope: CoroutineScope) {
                         onAdvanceCallback?.invoke(ayahNumber + 1)
                     } else {
                         stopWordSyncTicker()
-                        _state.update { it.copy(isPlaying = false, activeWordIndex = null, currentRepeatIndex = 1) }
+                        _state.update {
+                            it.copy(
+                                isPlaying = false,
+                                isBuffering = false,
+                                activeWordIndex = null,
+                                currentRepeatIndex = 1
+                            )
+                        }
                     }
                 }
                 setOnErrorListener { _, _, _ ->

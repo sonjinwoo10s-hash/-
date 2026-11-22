@@ -100,6 +100,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.audio.AudioPlayerState
 import com.example.audio.AyahAudioState
+import com.example.data.local.PersistentOfflineStorage
 import com.example.data.model.AyahRepeatMode
 import com.example.data.model.MushafPaperTheme
 import com.example.data.model.QuranBookmark
@@ -144,6 +145,8 @@ fun WahyMushafReaderScreen(
     bookmark: QuranBookmark?,
     audioState: AudioPlayerState,
     ayahAudioState: AyahAudioState,
+    activeVerseKey: String?,
+    activeWordIndex: Int?,
     tafsirState: TafsirUiState,
     onCloseMushaf: () -> Unit,
     onRetryOfflineLoad: () -> Unit,
@@ -295,19 +298,25 @@ fun WahyMushafReaderScreen(
         pageCount = { pages.size }
     )
 
-    // Unified synchronized Ayah & Word-by-Word highlight state.
-    // Strictly disabled when reciter has no official Quran.com timestamps (zero inaccurate highlighting).
-    val syncedSurah: Int? = when {
+    // Unified synchronized Ayah & Word-by-Word highlight state directly observed from activeVerseKey / activeWordIndex.
+    val parsedActiveVerse = remember(activeVerseKey) {
+        activeVerseKey?.split(":")?.let { parts ->
+            val s = parts.getOrNull(0)?.toIntOrNull()
+            val a = parts.getOrNull(1)?.toIntOrNull()
+            if (s != null && a != null) s to a else null
+        }
+    }
+    val syncedSurah: Int? = parsedActiveVerse?.first ?: when {
         ayahAudioState.isPlaying || ayahAudioState.isBuffering -> ayahAudioState.surahNumber
         audioState.hasOfficialTimings && audioState.syncedAyahNumber != null -> audioState.loadedSurahNumber
         else -> null
     }
-    val syncedAyah: Int? = when {
+    val syncedAyah: Int? = parsedActiveVerse?.second ?: when {
         ayahAudioState.isPlaying || ayahAudioState.isBuffering -> ayahAudioState.ayahNumber
         audioState.hasOfficialTimings -> audioState.syncedAyahNumber
         else -> null
     }
-    val syncedWordIndex: Int? = when {
+    val syncedWordIndex: Int? = activeWordIndex ?: when {
         ayahAudioState.isPlaying -> ayahAudioState.activeWordIndex
         audioState.hasOfficialTimings && audioState.wordByWordEnabled -> audioState.syncedWordIndex
         else -> null
@@ -708,6 +717,10 @@ fun WahyMushafReaderScreen(
 
                         // Expandable Online Audio Player Panel (with Playback Speed, Word-by-Word & Latency Calibration)
                         AnimatedVisibility(visible = showAudioPanel) {
+                            val currentAudioKey = PersistentOfflineStorage.surahAudioKey(
+                                audioState.selectedReciter.id,
+                                activePage.primarySurahNumber
+                            )
                             WahyOnlineAudioPanel(
                                 currentSurahNumber = activePage.primarySurahNumber,
                                 currentSurahName = activePage.primarySurahName,
@@ -721,7 +734,9 @@ fun WahyMushafReaderScreen(
                                 onToggleWordByWord = onToggleWordByWord,
                                 onSyncLatencyOffsetChange = onSyncLatencyOffsetChange,
                                 onDownloadMp3 = onDownloadMp3,
-                                onStopSingleAyah = onStopSingleAyah
+                                onStopSingleAyah = onStopSingleAyah,
+                                isCurrentSurahDownloaded = state.downloadedSurahAudioKeys.contains(currentAudioKey),
+                                isCurrentSurahDownloading = state.downloadingSurahAudioKeys.contains(currentAudioKey)
                             )
                         }
 
@@ -859,6 +874,7 @@ fun WahyMushafReaderScreen(
             tajweedColorsEnabled = tajweedColorsEnabled,
             isBookmarked = bookmark?.surahNumber == pageAyah.surahNumber &&
                 bookmark.ayahNumber == pageAyah.numberInSurah,
+            audioState = audioState,
             ayahAudioState = ayahAudioState,
             tafsirState = tafsirState,
             onDismiss = { longPressedAyah = null },
@@ -974,9 +990,9 @@ private fun WahyMushafSinglePage(
     onLongPressAyah: (MushafPageAyah) -> Unit
 ) {
     val scrollState = rememberScrollState()
-    // Exact requested synchronized Ayah tints: #332E7D32 light mode, #444CAF50 dark mode
-    val activeAyahTint = if (isNightMode) Color(0x444CAF50) else Color(0x332E7D32)
-    val activeWordTint = if (isNightMode) Color(0x774CAF50) else Color(0x662E7D32)
+    // Dual-layer highlight: subtle emerald background on active Ayah + crisp golden highlight on active Word
+    val activeAyahTint = if (isNightMode) Color(0x3D4CAF50) else Color(0x2A2E7D32)
+    val activeWordTint = if (isNightMode) Color(0x8CE7B84A) else Color(0x99F2C94C)
     val bookmarkHighlight = if (isNightMode) Color(0xFF28342C) else Color(0xFFF3E2B0)
     val isOpeningSpread = pageData.pageNumber == 1 || pageData.pageNumber == 2
 
@@ -1280,9 +1296,9 @@ private fun WahyContinuousAyahParagraph(
                             tajweedEnabled = tajweedColorsEnabled,
                             isNightMode = isNightMode,
                             baseTextColor = textColor,
-                            backgroundColor = Color.Transparent,
+                            backgroundColor = Color.Unspecified,
                             activeWordIndex = null,
-                            activeWordBackground = Color.Transparent
+                            activeWordBackground = Color.Unspecified
                         )
                     }
                     withStyle(

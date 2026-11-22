@@ -81,18 +81,36 @@ object PersistentOfflineStorage {
         return targetFile
     }
 
+    fun surahAudioKey(reciterId: String, surahNumber: Int): String {
+        val safeReciter = sanitizeSegment(reciterId)
+        val padded = surahNumber.coerceIn(1, 114).toString().padStart(3, '0')
+        return "${safeReciter}_$padded"
+    }
+
     /**
      * Persistent offline Surah MP3 path: `filesDir/offline_quran/audio/{safeReciterId}_{001}.mp3`.
      */
     fun getOfflineSurahAudioFile(context: Context, reciterId: String, surahNumber: Int): File {
-        val safeReciter = sanitizeSegment(reciterId)
-        val padded = surahNumber.coerceIn(1, 114).toString().padStart(3, '0')
-        return File(quranAudioDir(context), "${safeReciter}_$padded.mp3")
+        return File(quranAudioDir(context), "${surahAudioKey(reciterId, surahNumber)}.mp3")
     }
 
     fun isSurahAudioDownloaded(context: Context, reciterId: String, surahNumber: Int): Boolean {
         val f = getOfflineSurahAudioFile(context, reciterId, surahNumber)
         return f.exists() && f.length() > 1_024L
+    }
+
+    /**
+     * Dynamically scans `filesDir/offline_quran/audio/` for all verified non-empty downloaded MP3s
+     * and returns their normalized `{safeReciterId}_{001}` keys.
+     */
+    fun getDownloadedSurahKeys(context: Context): Set<String> {
+        val dir = quranAudioDir(context)
+        val files = dir.listFiles() ?: return emptySet()
+        return files
+            .asSequence()
+            .filter { it.isFile && it.name.endsWith(".mp3", ignoreCase = true) && it.length() > 1_024L }
+            .map { it.name.removeSuffix(".mp3") }
+            .toSet()
     }
 
     /**

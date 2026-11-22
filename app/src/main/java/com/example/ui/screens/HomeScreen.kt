@@ -1,9 +1,11 @@
 package com.example.ui.screens
 
+import android.app.DatePickerDialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.BorderStroke
@@ -29,13 +31,19 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Alarm
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ChevronLeft
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.NightsStay
+import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
@@ -44,9 +52,8 @@ import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -76,27 +83,29 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
-import com.example.data.local.OfflineIslamicData
+import com.example.alarm.AstronomicalPrayerCalculator
 import com.example.data.model.AdhanPlaybackStatus
 import com.example.data.model.AdhanPlayerState
 import com.example.data.model.CalculatedWakeupTime
-import com.example.data.model.CityOption
 import com.example.data.model.DailyQuote
 import com.example.data.model.FajrAlarmSettings
 import com.example.data.model.MuezzinItem
 import com.example.data.model.PrayerTimesUiState
 import com.example.data.model.QuranBookmark
 import com.example.data.model.WorshipTask
+import com.example.data.repository.GlobalLocationConfig
 import com.example.ui.theme.AmiriFontFamily
 import com.example.ui.theme.DeepGreen
 import com.example.ui.theme.EmeraldGreen
 import com.example.ui.theme.LocalIslamicColors
 import com.example.ui.theme.SoftGold
+import java.util.Calendar
 
 @Composable
 fun HomeScreen(
-    selectedCity: CityOption,
+    globalLocation: GlobalLocationConfig,
     prayerState: PrayerTimesUiState,
+    pendingQadaaCount: Int,
     activeMuezzin: MuezzinItem,
     adhanState: AdhanPlayerState,
     fajrAlarmSettings: FajrAlarmSettings,
@@ -105,7 +114,13 @@ fun HomeScreen(
     bookmark: QuranBookmark?,
     dailyVerse: DailyQuote,
     dailyHadith: DailyQuote,
-    onSelectCity: (CityOption) -> Unit,
+    onOpenGlobalLocation: () -> Unit,
+    onOpenPrayerTracker: () -> Unit,
+    onPrevPrayerDate: () -> Unit,
+    onNextPrayerDate: () -> Unit,
+    onSelectPrayerDate: (Int, Int, Int) -> Unit,
+    onReturnToTodayDate: () -> Unit,
+    onTogglePrayerPerformed: (String) -> Unit,
     onRefreshPrayers: () -> Unit,
     onToggleAdhanPreview: (MuezzinItem) -> Unit,
     onOpenMuezzinLibrary: () -> Unit,
@@ -127,13 +142,20 @@ fun HomeScreen(
         // 1. Prayer Times Hero Card
         item(key = "prayer_hero") {
             PrayerHeroCard(
-                selectedCity = selectedCity,
+                globalLocation = globalLocation,
                 prayerState = prayerState,
+                pendingQadaaCount = pendingQadaaCount,
                 activeMuezzin = activeMuezzin,
                 adhanState = adhanState,
                 fajrAlarmSettings = fajrAlarmSettings,
                 fajrWakeupTime = fajrWakeupTime,
-                onSelectCity = onSelectCity,
+                onOpenGlobalLocation = onOpenGlobalLocation,
+                onOpenPrayerTracker = onOpenPrayerTracker,
+                onPrevPrayerDate = onPrevPrayerDate,
+                onNextPrayerDate = onNextPrayerDate,
+                onSelectPrayerDate = onSelectPrayerDate,
+                onReturnToTodayDate = onReturnToTodayDate,
+                onTogglePrayerPerformed = onTogglePrayerPerformed,
                 onRefresh = onRefreshPrayers,
                 onToggleAdhanPreview = { onToggleAdhanPreview(activeMuezzin) },
                 onOpenMuezzinLibrary = onOpenMuezzinLibrary,
@@ -179,19 +201,39 @@ fun HomeScreen(
 
 @Composable
 private fun PrayerHeroCard(
-    selectedCity: CityOption,
+    globalLocation: GlobalLocationConfig,
     prayerState: PrayerTimesUiState,
+    pendingQadaaCount: Int,
     activeMuezzin: MuezzinItem,
     adhanState: AdhanPlayerState,
     fajrAlarmSettings: FajrAlarmSettings,
     fajrWakeupTime: CalculatedWakeupTime,
-    onSelectCity: (CityOption) -> Unit,
+    onOpenGlobalLocation: () -> Unit,
+    onOpenPrayerTracker: () -> Unit,
+    onPrevPrayerDate: () -> Unit,
+    onNextPrayerDate: () -> Unit,
+    onSelectPrayerDate: (Int, Int, Int) -> Unit,
+    onReturnToTodayDate: () -> Unit,
+    onTogglePrayerPerformed: (String) -> Unit,
     onRefresh: () -> Unit,
     onToggleAdhanPreview: () -> Unit,
     onOpenMuezzinLibrary: () -> Unit,
     onOpenFajrAlarm: () -> Unit
 ) {
-    var cityDropdownExpanded by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+
+    fun showDatePicker() {
+        val cal = AstronomicalPrayerCalculator.parseDateKey(prayerState.selectedDateKey)
+        DatePickerDialog(
+            context,
+            { _, year, month, dayOfMonth ->
+                onSelectPrayerDate(year, month, dayOfMonth)
+            },
+            cal.get(Calendar.YEAR),
+            cal.get(Calendar.MONTH),
+            cal.get(Calendar.DAY_OF_MONTH)
+        ).show()
+    }
 
     Card(
         modifier = Modifier
@@ -228,90 +270,119 @@ private fun PrayerHeroCard(
                     .fillMaxWidth()
                     .padding(16.dp)
             ) {
-                // Dates + City selector
+                // Top Header Row: Global Location Pill (opens GPS + Global Search modal)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.Top
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = prayerState.hijriDate,
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFFF6DC97)
-                        )
-                        if (prayerState.gregorianDate.isNotEmpty()) {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = Color.White.copy(alpha = 0.14f),
+                        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.28f)),
+                        modifier = Modifier
+                            .weight(1f, fill = false)
+                            .testTag("city_selector_button")
+                            .clickable(onClick = onOpenGlobalLocation)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.LocationOn,
+                                contentDescription = "تحديد الموقع العالمي",
+                                tint = Color(0xFFF6DC97),
+                                modifier = Modifier.size(16.dp)
+                            )
                             Text(
-                                text = prayerState.gregorianDate,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = Color.White.copy(alpha = 0.84f)
+                                text = globalLocation.displayLabel,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Icon(
+                                imageVector = Icons.Default.KeyboardArrowDown,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(16.dp)
                             )
                         }
                     }
 
-                    Spacer(modifier = Modifier.width(8.dp))
+                    // Sleek compact "سجلّي" pill + optional Blessed Days badge
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        if (!prayerState.blessedDayBadge.isNullOrBlank()) {
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = SoftGold.copy(alpha = 0.24f),
+                                border = BorderStroke(1.dp, SoftGold.copy(alpha = 0.7f)),
+                                modifier = Modifier.testTag("home_blessed_day_badge")
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 5.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(3.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.AutoAwesome,
+                                        contentDescription = prayerState.blessedDayBadge,
+                                        tint = Color(0xFFF6DC97),
+                                        modifier = Modifier.size(12.dp)
+                                    )
+                                    Text(
+                                        text = prayerState.blessedDayBadge,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = Color(0xFFF6DC97),
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+                        }
 
-                    Box {
                         Surface(
                             shape = RoundedCornerShape(12.dp),
-                            color = Color.White.copy(alpha = 0.14f),
-                            border = BorderStroke(1.dp, Color.White.copy(alpha = 0.28f)),
+                            color = Color.White.copy(alpha = 0.16f),
+                            border = BorderStroke(
+                                1.dp,
+                                if (pendingQadaaCount > 0) SoftGold.copy(alpha = 0.85f) else Color.White.copy(alpha = 0.3f)
+                            ),
                             modifier = Modifier
-                                .testTag("city_selector_button")
-                                .clickable { cityDropdownExpanded = true }
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable(onClick = onOpenPrayerTracker)
+                                .testTag("home_open_prayer_tracker_pill")
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 7.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
                                 Icon(
-                                    imageVector = Icons.Default.LocationOn,
-                                    contentDescription = "اختر المدينة",
+                                    imageVector = Icons.Default.CalendarMonth,
+                                    contentDescription = "سجلّي",
                                     tint = Color(0xFFF6DC97),
-                                    modifier = Modifier.size(16.dp)
+                                    modifier = Modifier.size(15.dp)
                                 )
                                 Text(
-                                    text = selectedCity.arabicLabel,
-                                    style = MaterialTheme.typography.labelMedium,
+                                    text = if (pendingQadaaCount > 0) "سجلّي ($pendingQadaaCount)" else "سجلّي",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.ExtraBold,
                                     color = Color.White,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Icon(
-                                    imageVector = Icons.Default.KeyboardArrowDown,
-                                    contentDescription = null,
-                                    tint = Color.White,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            }
-                        }
-
-                        DropdownMenu(
-                            expanded = cityDropdownExpanded,
-                            onDismissRequest = { cityDropdownExpanded = false }
-                        ) {
-                            OfflineIslamicData.cities.forEach { city ->
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            text = city.arabicLabel,
-                                            fontWeight = if (city.id == selectedCity.id) FontWeight.Bold else FontWeight.Normal,
-                                            color = if (city.id == selectedCity.id) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
-                                        )
-                                    },
-                                    onClick = {
-                                        cityDropdownExpanded = false
-                                        onSelectCity(city)
-                                    }
+                                    maxLines = 1
                                 )
                             }
                         }
                     }
                 }
 
-                Spacer(modifier = Modifier.height(14.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
                 // Next prayer & live countdown
                 Surface(
@@ -359,17 +430,218 @@ private fun PrayerHeroCard(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(14.dp))
+                // Subtle live Iqama countdown badge — visible ONLY between Adhan and Iqama
+                AnimatedVisibility(visible = prayerState.activeIqamaCountdown != null) {
+                    val iqama = prayerState.activeIqamaCountdown
+                    if (iqama != null) {
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = SoftGold.copy(alpha = 0.20f),
+                                border = BorderStroke(1.dp, SoftGold.copy(alpha = 0.65f)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("home_live_iqama_badge")
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp, vertical = 7.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            imageVector = Icons.Default.NotificationsActive,
+                                            contentDescription = "العد التنازلي للإقامة",
+                                            tint = Color(0xFFF6DC97),
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "متبقي على إقامة صلاة ${iqama.prayerArabicName}",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.White
+                                        )
+                                    }
+                                    CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                                        Text(
+                                            text = iqama.remainingText,
+                                            style = MaterialTheme.typography.labelLarge,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = Color(0xFFF6DC97),
+                                            letterSpacing = 0.8.sp
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
 
-                // 5 Daily Prayers Grid (Fajr card includes quick Smart Fajr Alarm indicator)
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Compact Date Navigation Bar right at the top of the prayer list
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = Color.Black.copy(alpha = 0.20f),
+                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.16f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("home_compact_date_bar")
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 4.dp, vertical = 4.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            IconButton(
+                                onClick = onPrevPrayerDate,
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .testTag("prayer_date_prev_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.ChevronRight,
+                                    contentDescription = "اليوم السابق",
+                                    tint = Color(0xFFF6DC97)
+                                )
+                            }
+
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable { showDatePicker() }
+                                    .padding(horizontal = 6.dp, vertical = 4.dp)
+                                    .testTag("prayer_date_picker_trigger"),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.CalendarMonth,
+                                        contentDescription = "اختيار التاريخ",
+                                        tint = Color(0xFFF6DC97),
+                                        modifier = Modifier.size(13.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = prayerState.hijriDate,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFFF6DC97),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                if (prayerState.gregorianDate.isNotEmpty()) {
+                                    Text(
+                                        text = prayerState.gregorianDate,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color.White.copy(alpha = 0.85f),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+
+                            IconButton(
+                                onClick = onNextPrayerDate,
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .testTag("prayer_date_next_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.ChevronLeft,
+                                    contentDescription = "اليوم التالي",
+                                    tint = Color(0xFFF6DC97)
+                                )
+                            }
+                        }
+
+                        // Contextual pills ONLY when not on today ("العودة لليوم" + past day "X/5 صلوات" summary)
+                        if (!prayerState.isSelectedDateToday) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                                horizontalArrangement = Arrangement.Center,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Surface(
+                                    shape = RoundedCornerShape(50),
+                                    color = SoftGold,
+                                    modifier = Modifier
+                                        .testTag("return_to_today_pill")
+                                        .clickable(onClick = onReturnToTodayDate)
+                                ) {
+                                    Text(
+                                        text = "العودة لليوم",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = Color(0xFF1A1405),
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp)
+                                    )
+                                }
+
+                                if (prayerState.isSelectedDatePast) {
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Surface(
+                                        shape = RoundedCornerShape(50),
+                                        color = if (prayerState.performedCount >= 5) {
+                                            Color(0xFF16A34A).copy(alpha = 0.85f)
+                                        } else {
+                                            Color.White.copy(alpha = 0.16f)
+                                        },
+                                        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.25f)),
+                                        modifier = Modifier.testTag("past_date_prayer_summary_badge")
+                                    ) {
+                                        Text(
+                                            text = "${prayerState.performedCount}/5 صلوات",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.White,
+                                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // 5 Daily Prayers Grid with subtle interactive Prayer Log checkmarks (Today & Past; hidden for Future)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     prayerState.prayers.forEach { entry ->
                         val isFajr = entry.key == "Fajr"
-                        val bgColor = if (entry.isNext) SoftGold.copy(alpha = 0.28f) else Color.White.copy(alpha = 0.12f)
-                        val borderColor = if (entry.isNext) Color(0xFFE7C875) else Color.White.copy(alpha = 0.12f)
+                        val showCheckmark = !prayerState.isSelectedDateFuture
+                        val isPastMissed = prayerState.isSelectedDatePast && !entry.isPerformed
+                        val bgColor = when {
+                            entry.isNext -> SoftGold.copy(alpha = 0.28f)
+                            showCheckmark && entry.isPerformed -> Color(0xFF16A34A).copy(alpha = 0.24f)
+                            isPastMissed -> Color.Black.copy(alpha = 0.22f)
+                            else -> Color.White.copy(alpha = 0.12f)
+                        }
+                        val borderColor = when {
+                            entry.isNext -> Color(0xFFE7C875)
+                            showCheckmark && entry.isPerformed -> Color(0xFF4ADE80).copy(alpha = 0.7f)
+                            else -> Color.White.copy(alpha = 0.12f)
+                        }
                         Column(
                             modifier = Modifier
                                 .weight(1f)
@@ -377,19 +649,26 @@ private fun PrayerHeroCard(
                                 .background(bgColor)
                                 .border(1.dp, borderColor, RoundedCornerShape(12.dp))
                                 .then(
-                                    if (isFajr) Modifier
-                                        .testTag("home_fajr_prayer_cell")
-                                        .clickable(onClick = onOpenFajrAlarm)
-                                    else Modifier
+                                    if (showCheckmark) {
+                                        Modifier
+                                            .testTag("home_prayer_cell_${entry.key}")
+                                            .clickable { onTogglePrayerPerformed(entry.key) }
+                                    } else if (isFajr) {
+                                        Modifier
+                                            .testTag("home_fajr_prayer_cell")
+                                            .clickable(onClick = onOpenFajrAlarm)
+                                    } else {
+                                        Modifier.testTag("home_prayer_cell_${entry.key}")
+                                    }
                                 )
-                                .padding(vertical = 9.dp, horizontal = 2.dp),
+                                .padding(vertical = 8.dp, horizontal = 2.dp),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(
                                     text = entry.arabicName,
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = Color.White.copy(alpha = 0.9f),
+                                    color = if (isPastMissed) Color.White.copy(alpha = 0.65f) else Color.White.copy(alpha = 0.92f),
                                     fontWeight = FontWeight.SemiBold,
                                     maxLines = 1
                                 )
@@ -399,7 +678,9 @@ private fun PrayerHeroCard(
                                         imageVector = Icons.Default.Alarm,
                                         contentDescription = "منبه الفجر الذكي",
                                         tint = if (fajrAlarmSettings.enabled) Color(0xFFF6DC97) else Color.White.copy(alpha = 0.6f),
-                                        modifier = Modifier.size(12.dp)
+                                        modifier = Modifier
+                                            .size(12.dp)
+                                            .clickable(onClick = onOpenFajrAlarm)
                                     )
                                 }
                             }
@@ -409,9 +690,146 @@ private fun PrayerHeroCard(
                                     text = entry.formatted12,
                                     style = MaterialTheme.typography.labelMedium,
                                     fontWeight = FontWeight.Bold,
-                                    color = if (entry.isNext) Color(0xFFF6DC97) else Color.White,
+                                    color = when {
+                                        entry.isNext -> Color(0xFFF6DC97)
+                                        isPastMissed -> Color.White.copy(alpha = 0.68f)
+                                        else -> Color.White
+                                    },
                                     maxLines = 1
                                 )
+                            }
+                            if (showCheckmark) {
+                                Spacer(modifier = Modifier.height(5.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .size(20.dp)
+                                        .clip(CircleShape)
+                                        .background(
+                                            when {
+                                                entry.isPerformed -> Color(0xFF16A34A)
+                                                prayerState.isSelectedDatePast -> Color.White.copy(alpha = 0.08f)
+                                                else -> Color.White.copy(alpha = 0.14f)
+                                            }
+                                        )
+                                        .border(
+                                            width = 1.dp,
+                                            color = when {
+                                                entry.isPerformed -> Color(0xFF86EFAC)
+                                                prayerState.isSelectedDatePast -> Color.White.copy(alpha = 0.28f)
+                                                else -> Color.White.copy(alpha = 0.42f)
+                                            },
+                                            shape = CircleShape
+                                        )
+                                        .testTag("prayer_log_check_${entry.key}"),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    if (entry.isPerformed) {
+                                        Icon(
+                                            imageVector = Icons.Default.Check,
+                                            contentDescription = "تم أداء ${entry.arabicName}",
+                                            tint = Color.White,
+                                            modifier = Modifier.size(13.dp)
+                                        )
+                                    } else if (prayerState.isSelectedDatePast) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(5.dp)
+                                                .clip(CircleShape)
+                                                .background(Color.White.copy(alpha = 0.35f))
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Automatic Islamic Midnight & Last Third of the Night Card (Offline Calculation)
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = Color.Black.copy(alpha = 0.22f),
+                    border = BorderStroke(1.dp, SoftGold.copy(alpha = 0.32f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("islamic_night_times_card")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Islamic Midnight (منتصف الليل الشرعي)
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.NightsStay,
+                                contentDescription = "منتصف الليل الشرعي",
+                                tint = Color(0xFFF6DC97),
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Column {
+                                Text(
+                                    text = "منتصف الليل الشرعي",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color.White.copy(alpha = 0.85f),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                                    Text(
+                                        text = prayerState.islamicMidnightFormatted,
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = Color(0xFFF6DC97),
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+                        }
+
+                        Box(
+                            modifier = Modifier
+                                .padding(horizontal = 8.dp)
+                                .width(1.dp)
+                                .height(28.dp)
+                                .background(SoftGold.copy(alpha = 0.35f))
+                        )
+
+                        // Last Third of the Night (الثلث الأخير من الليل)
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.AutoAwesome,
+                                contentDescription = "الثلث الأخير من الليل",
+                                tint = Color(0xFFF6DC97),
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Column {
+                                Text(
+                                    text = "الثلث الأخير من الليل",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color.White.copy(alpha = 0.85f),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                                    Text(
+                                        text = prayerState.lastThirdNightFormatted,
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = Color(0xFFF6DC97),
+                                        maxLines = 1
+                                    )
+                                }
                             }
                         }
                     }

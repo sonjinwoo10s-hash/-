@@ -9,6 +9,9 @@ import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -70,10 +73,16 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        if (!OnboardingPrefs.isCompleted(this)) {
-            startActivity(Intent(this, PermissionsOnboardingActivity::class.java))
-            finish()
-            return
+        val onboardingDone = runCatching { OnboardingPrefs.isCompleted(this) }.getOrDefault(true)
+        if (!onboardingDone) {
+            val started = runCatching {
+                startActivity(Intent(this, PermissionsOnboardingActivity::class.java))
+                true
+            }.getOrDefault(false)
+            if (started) {
+                finish()
+                return
+            }
         }
 
         enableEdgeToEdge(
@@ -86,18 +95,28 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (!AppIntegrityGuard.isTampered && OnboardingPrefs.isCompleted(this)) {
-            PrayerAlarmScheduler.scheduleAllPrayers(this)
-            PrayerCountdownService.syncState(this)
+        if (!AppIntegrityGuard.isTampered) {
+            val appCtx = applicationContext
+            lifecycleScope.launch(Dispatchers.IO) {
+                val onboardingDone = runCatching { OnboardingPrefs.isCompleted(appCtx) }.getOrDefault(true)
+                if (onboardingDone) {
+                    runCatching { PrayerAlarmScheduler.scheduleAllPrayers(appCtx) }
+                    runCatching { PrayerCountdownService.syncState(appCtx) }
+                }
+            }
         }
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-        if ((keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) &&
-            AdhanPlaybackService.isActivelyPlayingOrLoading() &&
-            PrayerScheduleStore.isAdhanSilenceOnVolumeEnabled(this)
-        ) {
-            AdhanPlaybackService.sendControlAction(this, AdhanPlaybackService.ACTION_STOP_ADHAN)
+        val shouldSilence = runCatching {
+            (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) &&
+                AdhanPlaybackService.isActivelyPlayingOrLoading() &&
+                PrayerScheduleStore.isAdhanSilenceOnVolumeEnabled(this)
+        }.getOrDefault(false)
+        if (shouldSilence) {
+            runCatching {
+                AdhanPlaybackService.sendControlAction(this, AdhanPlaybackService.ACTION_STOP_ADHAN)
+            }
             return true
         }
         return super.onKeyDown(keyCode, event)

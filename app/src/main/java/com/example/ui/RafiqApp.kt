@@ -61,8 +61,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.local.OfflineIslamicData
+import com.example.data.local.PersistentOfflineStorage
 import com.example.ui.components.AboutCopyrightModal
 import com.example.ui.components.AppUpdateOverlayHost
+import com.example.ui.components.GlobalLocationModal
 import com.example.ui.components.StickyQuranMiniPlayer
 import com.example.ui.screens.AzkarScreen
 import com.example.ui.screens.FajrAlarmRingingScreen
@@ -70,6 +72,7 @@ import com.example.ui.screens.FajrAlarmSettingsModal
 import com.example.ui.screens.HadithScreen
 import com.example.ui.screens.HomeScreen
 import com.example.ui.screens.MuezzinLibraryModal
+import com.example.ui.screens.PrayerTrackerScreen
 import com.example.ui.screens.QuranScreen
 import com.example.ui.screens.ReciterLibraryModal
 import com.example.ui.screens.ToolsScreen
@@ -86,7 +89,21 @@ import java.util.Calendar
 fun RafiqApp(viewModel: RafiqViewModel) {
     val darkMode by viewModel.darkMode.collectAsStateWithLifecycle()
     val selectedTab by viewModel.selectedTab.collectAsStateWithLifecycle()
-    val selectedCity by viewModel.selectedCity.collectAsStateWithLifecycle()
+    val globalLocation by viewModel.globalLocation.collectAsStateWithLifecycle()
+    val globalLocationModalOpen by viewModel.globalLocationModalOpen.collectAsStateWithLifecycle()
+    val showCalculationMethodPickerInModal by viewModel.showCalculationMethodPickerInModal.collectAsStateWithLifecycle()
+    val isDetectingLocation by viewModel.isDetectingLocation.collectAsStateWithLifecycle()
+    val globalSearchResults by viewModel.globalSearchResults.collectAsStateWithLifecycle()
+    val isSearchingLocations by viewModel.isSearchingLocations.collectAsStateWithLifecycle()
+    val hijriDayOffset by viewModel.hijriDayOffset.collectAsStateWithLifecycle()
+    val prayerLogStats by viewModel.prayerLogStats.collectAsStateWithLifecycle()
+    val prayerTrackerOpen by viewModel.prayerTrackerOpen.collectAsStateWithLifecycle()
+    val pendingQadaaItems by viewModel.pendingQadaaItems.collectAsStateWithLifecycle()
+    val prayerLogRevision by viewModel.prayerLogRevision.collectAsStateWithLifecycle()
+    val autoSilentEnabled by viewModel.autoSilentEnabled.collectAsStateWithLifecycle()
+    val autoSilentAtIqama by viewModel.autoSilentAtIqama.collectAsStateWithLifecycle()
+    val autoSilentDurationMinutes by viewModel.autoSilentDurationMinutes.collectAsStateWithLifecycle()
+    val fridayKahfReminderEnabled by viewModel.fridayKahfReminderEnabled.collectAsStateWithLifecycle()
     val prayerState by viewModel.prayerState.collectAsStateWithLifecycle()
     val worshipTasks by viewModel.worshipTasks.collectAsStateWithLifecycle()
     val inspirationIdx by viewModel.inspirationIndex.collectAsStateWithLifecycle()
@@ -97,6 +114,8 @@ fun RafiqApp(viewModel: RafiqViewModel) {
     val tajweedColorsEnabled by viewModel.tajweedColorsEnabled.collectAsStateWithLifecycle()
     val audioState by viewModel.audioState.collectAsStateWithLifecycle()
     val ayahAudioState by viewModel.ayahAudioState.collectAsStateWithLifecycle()
+    val activeVerseKey by viewModel.activeVerseKey.collectAsStateWithLifecycle()
+    val activeWordIndex by viewModel.activeWordIndex.collectAsStateWithLifecycle()
     val tafsirState by viewModel.tafsirState.collectAsStateWithLifecycle()
     val azkarState by viewModel.azkarState.collectAsStateWithLifecycle()
     val tasbihState by viewModel.tasbihState.collectAsStateWithLifecycle()
@@ -109,6 +128,8 @@ fun RafiqApp(viewModel: RafiqViewModel) {
     val defaultMuezzinId by viewModel.defaultMuezzinId.collectAsStateWithLifecycle()
     val fajrMuezzinId by viewModel.fajrMuezzinId.collectAsStateWithLifecycle()
     val useDedicatedFajrAdhan by viewModel.useDedicatedFajrAdhan.collectAsStateWithLifecycle()
+    val perPrayerMuezzinEnabled by viewModel.perPrayerMuezzinEnabled.collectAsStateWithLifecycle()
+    val perPrayerMuezzinIds by viewModel.perPrayerMuezzinIds.collectAsStateWithLifecycle()
     val favoriteMuezzinIds by viewModel.favoriteMuezzinIds.collectAsStateWithLifecycle()
     val adhanState by viewModel.adhanState.collectAsStateWithLifecycle()
     val muezzinLibraryOpen by viewModel.muezzinLibraryOpen.collectAsStateWithLifecycle()
@@ -120,6 +141,12 @@ fun RafiqApp(viewModel: RafiqViewModel) {
     val fajrWakeupTime by viewModel.fajrWakeupTime.collectAsStateWithLifecycle()
     val fajrAlarmSettingsOpen by viewModel.fajrAlarmSettingsOpen.collectAsStateWithLifecycle()
     val fajrAlarmRinging by viewModel.fajrAlarmRinging.collectAsStateWithLifecycle()
+    val prayerAlertsSettingsOpen by viewModel.prayerAlertsSettingsOpen.collectAsStateWithLifecycle()
+    val prayerAlertsSettings by viewModel.prayerAlertsSettings.collectAsStateWithLifecycle()
+    val alertSoundsCatalog by viewModel.alertSoundsCatalog.collectAsStateWithLifecycle()
+    val isSyncingAlertSounds by viewModel.isSyncingAlertSounds.collectAsStateWithLifecycle()
+    val cachedAlertSoundIds by viewModel.cachedAlertSoundIds.collectAsStateWithLifecycle()
+    val downloadingAlertSoundIds by viewModel.downloadingAlertSoundIds.collectAsStateWithLifecycle()
     val countdownNotificationEnabled by viewModel.countdownNotificationEnabled.collectAsStateWithLifecycle()
     val adhanSilenceOnVolume by viewModel.adhanSilenceOnVolume.collectAsStateWithLifecycle()
     val adhanSilenceOnFlip by viewModel.adhanSilenceOnFlip.collectAsStateWithLifecycle()
@@ -149,6 +176,9 @@ fun RafiqApp(viewModel: RafiqViewModel) {
         !muezzinLibraryOpen &&
         !reciterLibraryOpen &&
         !fajrAlarmSettingsOpen &&
+        !prayerAlertsSettingsOpen &&
+        !globalLocationModalOpen &&
+        !prayerTrackerOpen &&
         !fajrAlarmRinging &&
         !aboutCopyrightOpen
     ) {
@@ -180,6 +210,13 @@ fun RafiqApp(viewModel: RafiqViewModel) {
                 bottomBar = {
                     if (!isFullScreenQuran) {
                         val showStickyMiniPlayer = audioState.loadedSurahNumber != null
+                        val miniPlayerAudioKey = audioState.loadedSurahNumber?.let {
+                            PersistentOfflineStorage.surahAudioKey(audioState.selectedReciter.id, it)
+                        }
+                        val isMiniPlayerDownloaded = miniPlayerAudioKey != null &&
+                            quranState.downloadedSurahAudioKeys.contains(miniPlayerAudioKey)
+                        val isMiniPlayerDownloading = miniPlayerAudioKey != null &&
+                            quranState.downloadingSurahAudioKeys.contains(miniPlayerAudioKey)
                         if (!useNavigationRail) {
                             Column(
                                 modifier = Modifier
@@ -196,7 +233,9 @@ fun RafiqApp(viewModel: RafiqViewModel) {
                                         onSelectPlaybackSpeed = viewModel::setQuranPlaybackSpeed,
                                         onDownloadMp3 = viewModel::downloadCurrentSurahMp3,
                                         onOpenReciterLibrary = viewModel::openReciterLibrary,
-                                        onDismiss = viewModel::dismissMiniPlayer
+                                        onDismiss = viewModel::dismissMiniPlayer,
+                                        isCurrentSurahDownloaded = isMiniPlayerDownloaded,
+                                        isCurrentSurahDownloading = isMiniPlayerDownloading
                                     )
                                 }
                                 NavigationBar(
@@ -249,7 +288,9 @@ fun RafiqApp(viewModel: RafiqViewModel) {
                                     onDownloadMp3 = viewModel::downloadCurrentSurahMp3,
                                     onOpenReciterLibrary = viewModel::openReciterLibrary,
                                     onDismiss = viewModel::dismissMiniPlayer,
-                                    modifier = Modifier.widthIn(max = 620.dp)
+                                    modifier = Modifier.widthIn(max = 620.dp),
+                                    isCurrentSurahDownloaded = isMiniPlayerDownloaded,
+                                    isCurrentSurahDownloading = isMiniPlayerDownloading
                                 )
                             }
                         }
@@ -305,8 +346,9 @@ fun RafiqApp(viewModel: RafiqViewModel) {
 
                             when (selectedTab) {
                                 RafiqTab.HOME -> HomeScreen(
-                                    selectedCity = selectedCity,
+                                    globalLocation = globalLocation,
                                     prayerState = prayerState,
+                                    pendingQadaaCount = pendingQadaaItems.size,
                                     activeMuezzin = activeDefaultMuezzin,
                                     adhanState = adhanState,
                                     fajrAlarmSettings = fajrAlarmSettings,
@@ -315,8 +357,14 @@ fun RafiqApp(viewModel: RafiqViewModel) {
                                     bookmark = bookmark,
                                     dailyVerse = dailyVerse,
                                     dailyHadith = dailyHadith,
-                                    onSelectCity = viewModel::selectCity,
+                                    onOpenGlobalLocation = { viewModel.openGlobalLocationModal(includeMethodOverride = false) },
+                                    onOpenPrayerTracker = viewModel::openPrayerTracker,
                                     onRefreshPrayers = viewModel::refreshPrayerTimes,
+                                    onPrevPrayerDate = { viewModel.navigatePrayerDateByDays(-1) },
+                                    onNextPrayerDate = { viewModel.navigatePrayerDateByDays(1) },
+                                    onSelectPrayerDate = viewModel::selectPrayerDate,
+                                    onReturnToTodayDate = viewModel::returnToTodayPrayerDate,
+                                    onTogglePrayerPerformed = viewModel::togglePrayerPerformed,
                                     onToggleAdhanPreview = viewModel::toggleAdhanPreview,
                                     onOpenMuezzinLibrary = viewModel::openMuezzinLibrary,
                                     onOpenFajrAlarm = viewModel::openFajrAlarmSettings,
@@ -334,6 +382,8 @@ fun RafiqApp(viewModel: RafiqViewModel) {
                                     bookmark = bookmark,
                                     audioState = audioState,
                                     ayahAudioState = ayahAudioState,
+                                    activeVerseKey = activeVerseKey,
+                                    activeWordIndex = activeWordIndex,
                                     tafsirState = tafsirState,
                                     onSearchChange = viewModel::updateSurahSearch,
                                     onFilterChange = viewModel::updateRevelationFilter,
@@ -417,22 +467,29 @@ fun RafiqApp(viewModel: RafiqViewModel) {
 
                                 RafiqTab.TOOLS -> ToolsScreen(
                                     state = toolsState,
+                                    globalLocation = globalLocation,
+                                    prayerLogStats = prayerLogStats,
+                                    hijriDayOffset = hijriDayOffset,
                                     activeMuezzin = activeDefaultMuezzin,
                                     fajrAlarmSettings = fajrAlarmSettings,
                                     fajrWakeupTime = fajrWakeupTime,
                                     darkMode = darkMode,
-                                    countdownNotificationEnabled = countdownNotificationEnabled,
                                     adhanSilenceOnVolume = adhanSilenceOnVolume,
                                     adhanSilenceOnFlip = adhanSilenceOnFlip,
                                     isCheckingAppUpdate = appUpdateState.isChecking,
+                                    onOpenGlobalLocationSettings = { viewModel.openGlobalLocationModal(includeMethodOverride = true) },
+                                    onSelectHijriDayOffset = viewModel::setHijriDayOffset,
                                     onOpenMuezzinLibrary = viewModel::openMuezzinLibrary,
                                     onOpenFajrAlarm = viewModel::openFajrAlarmSettings,
+                                    onOpenPrayerAlertsSettings = viewModel::openPrayerAlertsSettings,
+                                    onOpenPrayerTracker = viewModel::openPrayerTracker,
+                                    onExportPrayerBackupJson = viewModel::exportPrayerBackupJson,
+                                    onImportPrayerBackupJson = viewModel::importPrayerBackupJson,
                                     onGpsLocation = viewModel::onGpsLocationDetected,
                                     onHeadingChanged = viewModel::updateDeviceHeading,
                                     onToggleCompassSensor = viewModel::setCompassSensorEnabled,
                                     onToggleGuide = viewModel::toggleGuideAccordion,
                                     onToggleDarkMode = viewModel::toggleDarkMode,
-                                    onToggleCountdownNotification = viewModel::setCountdownNotificationEnabled,
                                     onToggleAdhanSilenceOnVolume = viewModel::setAdhanSilenceOnVolume,
                                     onToggleAdhanSilenceOnFlip = viewModel::setAdhanSilenceOnFlip,
                                     onCheckForAppUpdate = { viewModel.checkForAppUpdate(manual = true) },
@@ -452,6 +509,8 @@ fun RafiqApp(viewModel: RafiqViewModel) {
                     defaultMuezzinId = defaultMuezzinId,
                     fajrMuezzinId = fajrMuezzinId,
                     useDedicatedFajrAdhan = useDedicatedFajrAdhan,
+                    perPrayerMuezzinEnabled = perPrayerMuezzinEnabled,
+                    perPrayerMuezzinIds = perPrayerMuezzinIds,
                     favoriteIds = favoriteMuezzinIds,
                     adhanState = adhanState,
                     isSyncingRepo = isSyncingMuezzinRepo,
@@ -468,6 +527,8 @@ fun RafiqApp(viewModel: RafiqViewModel) {
                     onSetDefaultMuezzin = viewModel::setDefaultMuezzin,
                     onSetFajrMuezzin = viewModel::setFajrMuezzin,
                     onToggleDedicatedFajr = viewModel::setUseDedicatedFajrAdhan,
+                    onTogglePerPrayerMuezzin = viewModel::setPerPrayerMuezzinEnabled,
+                    onSetMuezzinForPrayer = viewModel::setMuezzinForPrayer,
                     onAddCustomFromUrl = viewModel::addCustomMuezzinFromUrl,
                     onAddCustomFromFile = viewModel::addCustomMuezzinFromFile,
                     onOverrideAudioWithUrl = viewModel::overrideMuezzinAudioWithUrl,
@@ -498,6 +559,67 @@ fun RafiqApp(viewModel: RafiqViewModel) {
                     onUpdateSettings = viewModel::updateFajrAlarmSettings,
                     onTestAlarmNow = { viewModel.triggerFajrAlarmNow(isTest = true) },
                     onShowToast = viewModel::emitToast
+                )
+            }
+
+            if (prayerAlertsSettingsOpen) {
+                com.example.ui.screens.PrayerAlertsSettingsModal(
+                    settings = prayerAlertsSettings,
+                    alertSoundsCatalog = alertSoundsCatalog,
+                    isSyncingSounds = isSyncingAlertSounds,
+                    cachedAlertIds = cachedAlertSoundIds,
+                    downloadingAlertIds = downloadingAlertSoundIds,
+                    adhanState = adhanState,
+                    autoSilentEnabled = autoSilentEnabled,
+                    autoSilentAtIqama = autoSilentAtIqama,
+                    autoSilentDurationMinutes = autoSilentDurationMinutes,
+                    countdownNotificationEnabled = countdownNotificationEnabled,
+                    fridayKahfReminderEnabled = fridayKahfReminderEnabled,
+                    onClose = viewModel::closePrayerAlertsSettings,
+                    onTogglePreAdhan = viewModel::setPreAdhanEnabled,
+                    onSelectPreAdhanMinutes = viewModel::setPreAdhanMinutes,
+                    onSelectPreAdhanSound = viewModel::selectPreAdhanSound,
+                    onToggleIqama = viewModel::setIqamaEnabled,
+                    onChangeIqamaMinutes = viewModel::setIqamaMinutesForPrayer,
+                    onResetIqamaDefaults = viewModel::resetIqamaMinutesToDefaults,
+                    onSelectIqamaSound = viewModel::selectIqamaSound,
+                    onSyncSounds = { viewModel.syncAlertSoundsCatalog(manual = true) },
+                    onDownloadSoundOffline = { sound -> viewModel.downloadAlertSoundOffline(sound, silent = false) },
+                    onTogglePreviewSound = viewModel::toggleAlertSoundPreview,
+                    onToggleAutoSilent = viewModel::setAutoSilentEnabled,
+                    onToggleAutoSilentAtIqama = viewModel::setAutoSilentAtIqama,
+                    onSelectAutoSilentDuration = viewModel::setAutoSilentDurationMinutes,
+                    onToggleCountdownNotification = viewModel::setCountdownNotificationEnabled,
+                    onToggleFridayKahfReminder = viewModel::setFridayKahfReminderEnabled,
+                    onShowToast = viewModel::emitToast
+                )
+            }
+
+            if (globalLocationModalOpen) {
+                GlobalLocationModal(
+                    currentLocation = globalLocation,
+                    isDetectingLocation = isDetectingLocation,
+                    searchResults = globalSearchResults,
+                    isSearching = isSearchingLocations,
+                    showCalculationMethodSection = showCalculationMethodPickerInModal,
+                    onGpsDetected = viewModel::onGlobalGpsDetected,
+                    onSearchQueryChanged = viewModel::searchGlobalLocations,
+                    onSelectSearchResult = viewModel::selectGlobalSearchResult,
+                    onSelectCalculationMethod = viewModel::setManualCalculationMethod,
+                    onShowToast = viewModel::emitToast,
+                    onDismiss = viewModel::closeGlobalLocationModal
+                )
+            }
+
+            if (prayerTrackerOpen) {
+                PrayerTrackerScreen(
+                    stats = prayerLogStats,
+                    pendingQadaaItems = pendingQadaaItems,
+                    logRevision = prayerLogRevision,
+                    onTogglePrayerForDate = viewModel::togglePrayerPerformedForDate,
+                    onMarkQadaaDone = viewModel::markQadaaDone,
+                    onToggleSunnahHabit = viewModel::toggleSunnahHabitForDate,
+                    onClose = viewModel::closePrayerTracker
                 )
             }
 

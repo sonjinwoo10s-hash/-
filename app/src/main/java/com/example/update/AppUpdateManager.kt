@@ -8,6 +8,8 @@ import android.os.Environment
 import android.provider.Settings
 import androidx.core.content.FileProvider
 import com.example.BuildConfig
+import com.example.data.local.safeGetLong
+import com.example.data.local.safeGetString
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
@@ -55,7 +57,10 @@ object AppUpdateManager {
 
     private const val PREFS_NAME = "app_update_prefs"
     private const val KEY_LAST_CHECK_MS = "last_update_check_ms"
+    private const val KEY_DISMISSED_AT_MS = "update_popup_dismissed_at_ms"
+    private const val KEY_DISMISSED_VERSION = "update_popup_dismissed_version"
     private const val CHECK_INTERVAL_MS = 12L * 60L * 60L * 1000L // 12 hours
+    private const val DISMISS_SUPPRESS_MS = 24L * 60L * 60L * 1000L // 24 hours
 
     private val apiHttpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
@@ -109,13 +114,54 @@ object AppUpdateManager {
 
     fun shouldRunSilentCheck(context: Context): Boolean {
         val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val lastCheck = prefs.getLong(KEY_LAST_CHECK_MS, 0L)
+        val lastCheck = prefs.safeGetLong(KEY_LAST_CHECK_MS, 0L)
         return (System.currentTimeMillis() - lastCheck) >= CHECK_INTERVAL_MS
     }
 
     fun recordCheckTimestamp(context: Context) {
         val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().putLong(KEY_LAST_CHECK_MS, System.currentTimeMillis()).apply()
+    }
+
+    /**
+     * Records when the user cancelled or dismissed the floating update popup for [dismissedVersion].
+     */
+    fun recordDismissal(context: Context, dismissedVersion: String) {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit()
+            .putLong(KEY_DISMISSED_AT_MS, System.currentTimeMillis())
+            .putString(KEY_DISMISSED_VERSION, normalizeVersionTag(dismissedVersion))
+            .apply()
+    }
+
+    /**
+     * Returns true if the automatic startup popup should be suppressed because the user dismissed
+     * it within the last 24 hours — unless an even newer version than the dismissed one was released.
+     */
+    fun shouldSuppressPopupForDismissal(context: Context, remoteVersion: String): Boolean {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val dismissedAt = prefs.safeGetLong(KEY_DISMISSED_AT_MS, 0L)
+        if (dismissedAt <= 0L) return false
+
+        val elapsedMs = System.currentTimeMillis() - dismissedAt
+        if (elapsedMs < 0L || elapsedMs >= DISMISS_SUPPRESS_MS) return false
+
+        val dismissedVersion = prefs.safeGetString(KEY_DISMISSED_VERSION, "").orEmpty()
+        if (dismissedVersion.isNotBlank() && isRemoteVersionNewer(remoteVersion, dismissedVersion)) {
+            return false
+        }
+        return true
+    }
+
+    /**
+     * Clears any saved popup dismissal state (e.g., once the user chooses to download the update).
+     */
+    fun clearDismissal(context: Context) {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit()
+            .remove(KEY_DISMISSED_AT_MS)
+            .remove(KEY_DISMISSED_VERSION)
+            .apply()
     }
 
     /**

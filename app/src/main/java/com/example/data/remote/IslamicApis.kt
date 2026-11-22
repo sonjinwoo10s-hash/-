@@ -62,6 +62,14 @@ interface AlAdhanApi {
         @Query("country") country: String,
         @Query("method") method: Int
     ): AlAdhanResponse
+
+    @GET("v1/timings/{date}")
+    suspend fun getTimingsByCoordinates(
+        @Path("date") date: String,
+        @Query("latitude") latitude: Double,
+        @Query("longitude") longitude: Double,
+        @Query("method") method: Int
+    ): AlAdhanResponse
 }
 
 // ---- AlQuran Cloud API Models ----

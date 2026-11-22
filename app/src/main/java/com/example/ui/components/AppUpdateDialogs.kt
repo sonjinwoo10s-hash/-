@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -36,18 +37,30 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.example.ui.theme.CardDark
+import com.example.ui.theme.DeepGreen
+import com.example.ui.theme.DeepGreenDark
+import com.example.ui.theme.EmeraldGreen
+import com.example.ui.theme.GoldDark
 import com.example.ui.theme.LocalIslamicColors
+import com.example.ui.theme.NightReadGold
+import com.example.ui.theme.SoftGold
 import com.example.update.AppReleaseInfo
 import com.example.update.AppUpdateManager
 import java.io.File
@@ -117,109 +130,10 @@ fun AppUpdateOverlayHost(
 
         AppUpdateDialogStage.UPDATE_AVAILABLE -> {
             val release = state.availableRelease ?: return
-            AlertDialog(
-                onDismissRequest = onDismiss,
-                containerColor = MaterialTheme.colorScheme.surface,
-                shape = RoundedCornerShape(24.dp),
-                icon = {
-                    Box(
-                        modifier = Modifier
-                            .size(54.dp)
-                            .clip(CircleShape)
-                            .background(islamic.emeraldSoft),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.SystemUpdate,
-                            contentDescription = "تحديث جديد متاح",
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(28.dp)
-                        )
-                    }
-                },
-                title = {
-                    Text(
-                        text = "تحديث جديد متاح (الإصدار ${release.versionName})",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                },
-                text = {
-                    Column(modifier = Modifier.fillMaxWidth()) {
-                        Text(
-                            text = "ما الجديد في هذا الإصدار:",
-                            style = MaterialTheme.typography.labelLarge,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Surface(
-                            shape = RoundedCornerShape(14.dp),
-                            color = islamic.cardAlt,
-                            border = BorderStroke(1.dp, islamic.border),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(min = 60.dp, max = 220.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .verticalScroll(rememberScrollState())
-                                    .padding(12.dp)
-                            ) {
-                                Text(
-                                    text = release.releaseNotes,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurface
-                                )
-                            }
-                        }
-                        if (release.assetSizeBytes > 0L) {
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = "حجم التحديث: ${AppUpdateManager.formatMegabytes(release.assetSizeBytes)} ميجابايت",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = islamic.textMuted
-                            )
-                        }
-                    }
-                },
-                confirmButton = {
-                    Button(
-                        onClick = onStartDownload,
-                        shape = RoundedCornerShape(12.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.primary,
-                            contentColor = Color.White
-                        ),
-                        modifier = Modifier.testTag("update_now_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Download,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "تحديث الآن",
-                            fontWeight = FontWeight.ExtraBold
-                        )
-                    }
-                },
-                dismissButton = {
-                    TextButton(
-                        onClick = onDismiss,
-                        modifier = Modifier.testTag("update_later_button")
-                    ) {
-                        Text(
-                            text = "لاحقاً",
-                            fontWeight = FontWeight.Bold,
-                            color = islamic.textMuted
-                        )
-                    }
-                }
+            FloatingUpdateAvailableDialog(
+                release = release,
+                onUpdateNow = onStartDownload,
+                onCancel = onDismiss
             )
         }
 
@@ -455,6 +369,211 @@ fun AppUpdateOverlayHost(
                     }
                 }
             )
+        }
+    }
+}
+
+@Composable
+private fun FloatingUpdateAvailableDialog(
+    release: AppReleaseInfo,
+    onUpdateNow: () -> Unit,
+    onCancel: () -> Unit
+) {
+    Dialog(
+        onDismissRequest = onCancel,
+        properties = DialogProperties(
+            dismissOnBackPress = true,
+            dismissOnClickOutside = true,
+            usePlatformDefaultWidth = false
+        )
+    ) {
+        CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
+            Surface(
+                shape = RoundedCornerShape(26.dp),
+                border = BorderStroke(1.25.dp, SoftGold.copy(alpha = 0.65f)),
+                shadowElevation = 18.dp,
+                color = DeepGreenDark,
+                modifier = Modifier
+                    .fillMaxWidth(0.92f)
+                    .widthIn(max = 400.dp)
+                    .testTag("update_available_floating_dialog")
+            ) {
+                Box(
+                    modifier = Modifier
+                        .background(
+                            brush = Brush.verticalGradient(
+                                colors = listOf(
+                                    EmeraldGreen,
+                                    DeepGreen,
+                                    DeepGreenDark
+                                )
+                            )
+                        )
+                        .padding(horizontal = 20.dp, vertical = 22.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        // Circular gold-rimmed update icon badge
+                        Surface(
+                            shape = CircleShape,
+                            color = SoftGold.copy(alpha = 0.16f),
+                            border = BorderStroke(1.2.dp, GoldDark.copy(alpha = 0.72f)),
+                            modifier = Modifier.size(60.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Default.SystemUpdate,
+                                    contentDescription = "تحديث جديد متاح",
+                                    tint = NightReadGold,
+                                    modifier = Modifier.size(30.dp)
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(14.dp))
+
+                        // Header title
+                        Text(
+                            text = "تحديث جديد متاح!",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color.White,
+                            textAlign = TextAlign.Center
+                        )
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        // Version badge (+ optional APK size pill)
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(50),
+                                color = SoftGold.copy(alpha = 0.20f),
+                                border = BorderStroke(1.dp, GoldDark.copy(alpha = 0.65f)),
+                                modifier = Modifier.testTag("update_version_badge")
+                            ) {
+                                Text(
+                                    text = "الإصدار ${release.versionName}",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = NightReadGold,
+                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 5.dp)
+                                )
+                            }
+
+                            if (release.assetSizeBytes > 0L) {
+                                Surface(
+                                    shape = RoundedCornerShape(50),
+                                    color = Color.White.copy(alpha = 0.10f),
+                                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.20f))
+                                ) {
+                                    Text(
+                                        text = "${AppUpdateManager.formatMegabytes(release.assetSizeBytes)} م.ب",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White.copy(alpha = 0.88f),
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(18.dp))
+
+                        // Release notes label
+                        Text(
+                            text = "ما الجديد في هذا الإصدار:",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = NightReadGold,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        // Scrollable release notes container
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = CardDark.copy(alpha = 0.68f),
+                            border = BorderStroke(1.dp, SoftGold.copy(alpha = 0.30f)),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 72.dp, max = 210.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .verticalScroll(rememberScrollState())
+                                    .padding(14.dp)
+                            ) {
+                                Text(
+                                    text = release.releaseNotes,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = Color.White.copy(alpha = 0.94f),
+                                    modifier = Modifier.testTag("update_release_notes_text")
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(20.dp))
+
+                        // Action buttons: Primary gold "تحديث الآن" & Secondary outlined "إلغاء"
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Button(
+                                onClick = onUpdateNow,
+                                shape = RoundedCornerShape(14.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = GoldDark,
+                                    contentColor = MaterialTheme.colorScheme.onSecondary
+                                ),
+                                modifier = Modifier
+                                    .weight(1.35f)
+                                    .heightIn(min = 48.dp)
+                                    .testTag("update_now_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Download,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "تحديث الآن",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                            }
+
+                            OutlinedButton(
+                                onClick = onCancel,
+                                shape = RoundedCornerShape(14.dp),
+                                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.38f)),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    containerColor = Color.White.copy(alpha = 0.06f),
+                                    contentColor = Color.White.copy(alpha = 0.92f)
+                                ),
+                                modifier = Modifier
+                                    .weight(0.95f)
+                                    .heightIn(min = 48.dp)
+                                    .testTag("update_cancel_button")
+                            ) {
+                                Text(
+                                    text = "إلغاء",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

@@ -39,30 +39,34 @@ object OfflineAdhkarRepository {
         cachedCategories = null
     }
 
-    private fun parseAdhkarJson(jsonText: String): LinkedHashMap<String, List<ZikrItem>> {
+    private fun parseAdhkarJson(jsonText: String): LinkedHashMap<String, List<ZikrItem>> = runCatching {
         val root = JSONObject(jsonText)
-        val categoriesArr = root.optJSONArray("categories") ?: return linkedMapOf()
+        val categoriesArr = root.optJSONArray("categories") ?: return@runCatching linkedMapOf()
         val result = LinkedHashMap<String, List<ZikrItem>>(categoriesArr.length())
         for (i in 0 until categoriesArr.length()) {
-            val catObj = categoriesArr.optJSONObject(i) ?: continue
-            val name = catObj.optString("name").trim()
-            if (name.isEmpty()) continue
-            val itemsArr = catObj.optJSONArray("items") ?: continue
-            val items = ArrayList<ZikrItem>(itemsArr.length())
-            for (j in 0 until itemsArr.length()) {
-                val itemObj = itemsArr.optJSONObject(j) ?: continue
-                val id = itemObj.optString("id").trim()
-                val text = itemObj.optString("text").trim()
-                val virtue = itemObj.optString("virtue").trim()
-                val count = itemObj.optInt("count", 1).coerceAtLeast(1)
-                if (id.isNotEmpty() && text.isNotEmpty()) {
-                    items.add(ZikrItem(id = id, text = text, virtue = virtue, requiredCount = count))
+            runCatching {
+                val catObj = categoriesArr.optJSONObject(i) ?: return@runCatching
+                val name = catObj.optString("name", "").trim()
+                if (name.isEmpty()) return@runCatching
+                val itemsArr = catObj.optJSONArray("items") ?: return@runCatching
+                val items = ArrayList<ZikrItem>(itemsArr.length())
+                for (j in 0 until itemsArr.length()) {
+                    runCatching {
+                        val itemObj = itemsArr.optJSONObject(j) ?: return@runCatching
+                        val id = itemObj.optString("id", "").trim()
+                        val text = itemObj.optString("text", "").trim()
+                        val virtue = itemObj.optString("virtue", "").trim()
+                        val count = itemObj.optInt("count", 1).coerceAtLeast(1)
+                        if (id.isNotEmpty() && text.isNotEmpty()) {
+                            items.add(ZikrItem(id = id, text = text, virtue = virtue, requiredCount = count))
+                        }
+                    }
+                }
+                if (items.isNotEmpty()) {
+                    result[name] = items
                 }
             }
-            if (items.isNotEmpty()) {
-                result[name] = items
-            }
         }
-        return result
-    }
+        result
+    }.getOrDefault(linkedMapOf())
 }

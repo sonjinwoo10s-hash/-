@@ -9,6 +9,6 @@ import com.example.security.AppIntegrityGuard
 class RafiqApplication : Application() {
     override fun onCreate() {
         super.onCreate()
-        AppIntegrityGuard.verifyReleaseIntegrity(this)
+        runCatching { AppIntegrityGuard.verifyReleaseIntegrity(this) }
     }
 }

@@ -42,16 +42,6 @@ enum class HadithBookCollection(
         expectedCount = 7563,
         estimatedBytes = 7_600_000L
     ),
-    RIYAD(
-        id = "riyadussalihin",
-        arabicTitle = "رياض الصالحين",
-        shortTitle = "رياض الصالحين",
-        author = "الإمام يحيى بن شرف النووي",
-        subtitle = "مختارات من أصح الأحاديث في الآداب والرقائق",
-        editionFile = "ara-riyadussalihin.min.json",
-        expectedCount = 1896,
-        estimatedBytes = 2_100_000L
-    ),
     ABUDAWUD(
         id = "abudawud",
         arabicTitle = "سنن أبي داود",

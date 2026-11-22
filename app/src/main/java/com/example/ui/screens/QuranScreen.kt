@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.AutoStories
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Fullscreen
@@ -92,6 +93,7 @@ import androidx.compose.ui.unit.sp
 import com.example.audio.AudioPlayerState
 import com.example.audio.AyahAudioState
 import com.example.data.local.OfflineIslamicData
+import com.example.data.local.PersistentOfflineStorage
 import com.example.data.model.AyahItem
 import com.example.data.model.AyahRepeatMode
 import com.example.data.model.MushafPaperTheme
@@ -122,6 +124,8 @@ fun QuranScreen(
     bookmark: QuranBookmark?,
     audioState: AudioPlayerState,
     ayahAudioState: AyahAudioState,
+    activeVerseKey: String?,
+    activeWordIndex: Int?,
     tafsirState: TafsirUiState,
     onSearchChange: (String) -> Unit,
     onFilterChange: (String) -> Unit,
@@ -173,6 +177,8 @@ fun QuranScreen(
             bookmark = bookmark,
             audioState = audioState,
             ayahAudioState = ayahAudioState,
+            activeVerseKey = activeVerseKey,
+            activeWordIndex = activeWordIndex,
             tafsirState = tafsirState,
             onCloseMushaf = onCloseReader,
             onRetryOfflineLoad = onRetryOfflineMushaf,
@@ -526,10 +532,13 @@ private fun SurahListView(
                     items(filteredSurahs, key = { it.number }) { surah ->
                         val isPlayingThis = audioState.loadedSurahNumber == surah.number && audioState.isPlaying
                         val isBufferingThis = audioState.loadedSurahNumber == surah.number && audioState.isBuffering
+                        val audioKey = PersistentOfflineStorage.surahAudioKey(audioState.selectedReciter.id, surah.number)
+                        val isDownloadedOffline = state.downloadedSurahAudioKeys.contains(audioKey)
                         SurahListItem(
                             surah = surah,
                             isPlaying = isPlayingThis,
                             isBuffering = isBufferingThis,
+                            isDownloadedOffline = isDownloadedOffline,
                             onClick = { onOpenSurah(surah) },
                             onPlayClick = { onPlaySurahFromList(surah) }
                         )
@@ -545,6 +554,7 @@ private fun SurahListItem(
     surah: SurahSummary,
     isPlaying: Boolean,
     isBuffering: Boolean,
+    isDownloadedOffline: Boolean = false,
     onClick: () -> Unit,
     onPlayClick: () -> Unit
 ) {
@@ -600,11 +610,45 @@ private fun SurahListItem(
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     val pageLabel = if (surah.startPage > 0) " • ص ${toArabicIndicDigits(surah.startPage)}" else ""
-                    Text(
-                        text = "${if (surah.revelationType == "Meccan") "مكية" else "مدنية"} • ${surah.numberOfAyahs} آية$pageLabel",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = islamic.textMuted
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = "${if (surah.revelationType == "Meccan") "مكية" else "مدنية"} • ${surah.numberOfAyahs} آية$pageLabel",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = islamic.textMuted,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                        if (isDownloadedOffline) {
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = Color(0xFF16A34A).copy(alpha = 0.14f),
+                                modifier = Modifier.testTag("surah_offline_badge_${surah.number}")
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(3.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.CheckCircle,
+                                        contentDescription = "تم تحميل السورة أوفلاين",
+                                        tint = Color(0xFF16A34A),
+                                        modifier = Modifier.size(12.dp)
+                                    )
+                                    Text(
+                                        text = "أوفلاين ✓",
+                                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = Color(0xFF16A34A)
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
             }
 

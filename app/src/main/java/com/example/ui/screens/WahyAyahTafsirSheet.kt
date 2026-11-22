@@ -69,6 +69,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.audio.AudioPlayerState
 import com.example.audio.AyahAudioState
 import com.example.data.model.AyahRepeatMode
 import com.example.data.repository.MushafPageAyah
@@ -92,6 +93,7 @@ fun WahyAyahTafsirSheet(
     isNightMode: Boolean,
     tajweedColorsEnabled: Boolean,
     isBookmarked: Boolean,
+    audioState: AudioPlayerState,
     ayahAudioState: AyahAudioState,
     tafsirState: TafsirUiState,
     onDismiss: () -> Unit,
@@ -110,14 +112,25 @@ fun WahyAyahTafsirSheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var showRepeatOptions by remember { mutableStateOf(false) }
 
-    val isThisAyahPlayingSingle = ayahAudioState.surahNumber == ayah.surahNumber &&
+    val isThisAyahPlayingDirectSingle = ayahAudioState.surahNumber == ayah.surahNumber &&
         ayahAudioState.ayahNumber == ayah.numberInSurah &&
         ayahAudioState.isPlaying &&
         !ayahAudioState.continueReading
-    val isThisAyahPlayingContinuous = ayahAudioState.surahNumber == ayah.surahNumber &&
+    val isThisAyahPlayingDirectContinuous = ayahAudioState.surahNumber == ayah.surahNumber &&
         ayahAudioState.ayahNumber == ayah.numberInSurah &&
         ayahAudioState.isPlaying &&
         ayahAudioState.continueReading
+    val isThisAyahPlayingSurahSingle = audioState.loadedSurahNumber == ayah.surahNumber &&
+        audioState.syncedAyahNumber == ayah.numberInSurah &&
+        audioState.isPlaying &&
+        audioState.isSingleAyahMode
+    val isThisAyahPlayingSurahContinuous = audioState.loadedSurahNumber == ayah.surahNumber &&
+        audioState.syncedAyahNumber == ayah.numberInSurah &&
+        audioState.isPlaying &&
+        !audioState.isSingleAyahMode
+
+    val isThisAyahPlayingSingle = isThisAyahPlayingDirectSingle || isThisAyahPlayingSurahSingle
+    val isThisAyahPlayingContinuous = isThisAyahPlayingDirectContinuous || isThisAyahPlayingSurahContinuous
 
     val selectedBook = tafsirState.selectedBook
     val isSelectedBookDownloaded = tafsirState.downloadedBookIds.contains(selectedBook.bookId)

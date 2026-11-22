@@ -79,18 +79,18 @@ object OfflineIslamicData {
 
     val reciters: List<ReciterOption> = listOf(
         ReciterOption(
-            id = "featured_yasser_dosari",
-            arabicName = "ياسر الدوسري",
-            riwayahName = "حفص عن عاصم - مرتل",
-            serverUrl = "https://server11.mp3quran.net/yasser/",
-            fallbackUrlTemplate = "https://cdn.islamic.network/quran/audio-surah/128/ar.alafasy/{surah}.mp3",
-            isFeatured = true
-        ),
-        ReciterOption(
             id = "featured_alafasy",
             arabicName = "مشاري راشد العفاسي",
             riwayahName = "حفص عن عاصم - مرتل",
             serverUrl = "https://server8.mp3quran.net/afs/",
+            fallbackUrlTemplate = "https://cdn.islamic.network/quran/audio-surah/128/ar.alafasy/{surah}.mp3",
+            isFeatured = true
+        ),
+        ReciterOption(
+            id = "featured_yasser_dosari",
+            arabicName = "ياسر الدوسري",
+            riwayahName = "حفص عن عاصم - مرتل",
+            serverUrl = "https://server11.mp3quran.net/yasser/",
             fallbackUrlTemplate = "https://cdn.islamic.network/quran/audio-surah/128/ar.alafasy/{surah}.mp3",
             isFeatured = true
         ),

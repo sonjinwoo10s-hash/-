@@ -35,6 +35,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Alarm
 import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.GraphicEq
@@ -47,6 +48,8 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -58,7 +61,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -81,12 +86,13 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.example.BuildConfig
 import com.example.PermissionsOnboardingActivity
-import com.example.alarm.PermissionsHelper
+import com.example.alarm.PrayerLogStats
 import com.example.data.local.OfflineIslamicData
 import com.example.data.model.CalculatedWakeupTime
 import com.example.data.model.FajrAlarmSettings
 import com.example.data.model.GuideSection
 import com.example.data.model.MuezzinItem
+import com.example.data.repository.GlobalLocationConfig
 import com.example.sensor.QiblaCompassSensor
 import com.example.ui.components.performKeyTapHaptic
 import com.example.ui.theme.LocalIslamicColors
@@ -100,22 +106,29 @@ import kotlin.math.roundToInt
 @Composable
 fun ToolsScreen(
     state: ToolsUiState,
+    globalLocation: GlobalLocationConfig,
+    prayerLogStats: PrayerLogStats,
+    hijriDayOffset: Int,
     activeMuezzin: MuezzinItem,
     fajrAlarmSettings: FajrAlarmSettings,
     fajrWakeupTime: CalculatedWakeupTime,
     darkMode: Boolean,
-    countdownNotificationEnabled: Boolean,
     adhanSilenceOnVolume: Boolean,
     adhanSilenceOnFlip: Boolean,
     isCheckingAppUpdate: Boolean,
     onOpenMuezzinLibrary: () -> Unit,
     onOpenFajrAlarm: () -> Unit,
+    onOpenPrayerAlertsSettings: () -> Unit,
+    onOpenPrayerTracker: () -> Unit,
+    onExportPrayerBackupJson: () -> String,
+    onImportPrayerBackupJson: (String) -> Unit,
+    onOpenGlobalLocationSettings: () -> Unit,
+    onSelectHijriDayOffset: (Int) -> Unit,
     onGpsLocation: (Location) -> Unit,
     onHeadingChanged: (Float) -> Unit,
     onToggleCompassSensor: (Boolean) -> Unit,
     onToggleGuide: (String) -> Unit,
     onToggleDarkMode: () -> Unit,
-    onToggleCountdownNotification: (Boolean) -> Unit,
     onToggleAdhanSilenceOnVolume: (Boolean) -> Unit,
     onToggleAdhanSilenceOnFlip: (Boolean) -> Unit,
     onCheckForAppUpdate: () -> Unit,
@@ -126,6 +139,43 @@ fun ToolsScreen(
     val context = LocalContext.current
     val view = LocalView.current
     val islamic = LocalIslamicColors.current
+    var hijriOffsetMenuExpanded by remember { mutableStateOf(false) }
+
+    // Zero-permission Android SAF launchers for manual JSON backup export/import
+    val exportBackupLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json")
+    ) { uri: Uri? ->
+        if (uri != null) {
+            runCatching {
+                val jsonPayload = onExportPrayerBackupJson()
+                context.contentResolver.openOutputStream(uri)?.use { out ->
+                    out.write(jsonPayload.toByteArray(Charsets.UTF_8))
+                }
+            }.onSuccess {
+                onShowToast("تم تصدير النسخة الاحتياطية بنجاح ✓")
+            }.onFailure {
+                onShowToast("تعذّر حفظ ملف النسخة الاحتياطية")
+            }
+        }
+    }
+
+    val importBackupLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
+            }.onSuccess { rawText ->
+                if (!rawText.isNullOrBlank()) {
+                    onImportPrayerBackupJson(rawText)
+                } else {
+                    onShowToast("الملف المحدد فارغ")
+                }
+            }.onFailure {
+                onShowToast("تعذّر قراءة ملف النسخة الاحتياطية")
+            }
+        }
+    }
 
     // Live hardware compass sensor lifecycle
     val compassSensor = remember(context) {
@@ -180,16 +230,6 @@ fun ToolsScreen(
             requestCurrentGps()
         } else {
             onShowToast("يرجى السماح بصلاحية الموقع لحساب القبلة من موقعك الحالي")
-        }
-    }
-
-    val notificationPermissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        if (granted) {
-            onToggleCountdownNotification(true)
-        } else {
-            onShowToast("يرجى السماح بإذن الإشعارات لعرض عدّاد الصلاة القادمة")
         }
     }
 
@@ -503,38 +543,234 @@ fun ToolsScreen(
                         color = islamic.border
                     )
 
+                    // Interactive Prayer Log Summary Row -> opens full-screen PrayerTrackerScreen
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable {
+                                performKeyTapHaptic(view)
+                                onOpenPrayerTracker()
+                            }
+                            .padding(vertical = 2.dp)
+                            .testTag("settings_prayer_log_summary_row"),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "إشعار الوقت المتبقي للصلاة القادمة",
+                                text = "سجل الصلوات والعبادات",
                                 style = MaterialTheme.typography.bodyMedium,
                                 fontWeight = FontWeight.SemiBold
                             )
                             Text(
-                                text = "إشعار صامت ومستمر في شريط الحالة يتحدّث كل دقيقة",
+                                text = "أسبوعي ${prayerLogStats.weeklyPercent}% • شهري ${prayerLogStats.monthlyPercent}% • سلسلة ${prayerLogStats.currentStreakDays} أيام",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = islamic.textMuted
                             )
                         }
                         Spacer(modifier = Modifier.width(8.dp))
-                        Switch(
-                            checked = countdownNotificationEnabled,
-                            onCheckedChange = { wantEnabled ->
-                                if (wantEnabled &&
-                                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                                    !PermissionsHelper.isNotificationGranted(context)
-                                ) {
-                                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = islamic.emeraldSoft,
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f))
+                        ) {
+                            Text(
+                                text = if (prayerLogStats.pendingQadaaCount > 0) {
+                                    "قضاء ${prayerLogStats.pendingQadaaCount}"
                                 } else {
-                                    onToggleCountdownNotification(wantEnabled)
-                                }
+                                    "${prayerLogStats.todayCompleted}/5 اليوم"
+                                },
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                            )
+                        }
+                    }
+
+                    HorizontalDivider(
+                        modifier = Modifier.padding(vertical = 10.dp),
+                        color = islamic.border
+                    )
+
+                    // Discreet Zero-Login Manual Backup Fallback (Android Auto Backup is already active automatically)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("settings_manual_backup_row"),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "تصدير / استيراد نسخة احتياطية",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = "النسخ التلقائي لنظام أندرويد مفعّل بدون حساب",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = islamic.textMuted
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedButton(
+                                onClick = {
+                                    performKeyTapHaptic(view)
+                                    exportBackupLauncher.launch("rafiq_al_muslim_backup.json")
+                                },
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                modifier = Modifier.testTag("export_backup_button")
+                            ) {
+                                Text("تصدير", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                            }
+                            OutlinedButton(
+                                onClick = {
+                                    performKeyTapHaptic(view)
+                                    importBackupLauncher.launch(arrayOf("application/json", "text/plain", "*/*"))
+                                },
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                modifier = Modifier.testTag("import_backup_button")
+                            ) {
+                                Text("استيراد", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(
+                        modifier = Modifier.padding(vertical = 10.dp),
+                        color = islamic.border
+                    )
+
+                    // Global Location & Calculation Method Row
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable {
+                                performKeyTapHaptic(view)
+                                onOpenGlobalLocationSettings()
+                            }
+                            .padding(vertical = 2.dp)
+                            .testTag("settings_global_location_row"),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "الموقع وطريقة الحساب",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = "${globalLocation.displayLabel} • ${globalLocation.resolvedMethod().shortArabicName}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = islamic.textMuted
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        OutlinedButton(
+                            onClick = {
+                                performKeyTapHaptic(view)
+                                onOpenGlobalLocationSettings()
                             },
-                            modifier = Modifier.testTag("settings_countdown_notification_switch")
-                        )
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.testTag("settings_global_location_button")
+                        ) {
+                            Text("تغيير")
+                        }
+                    }
+
+                    HorizontalDivider(
+                        modifier = Modifier.padding(vertical = 10.dp),
+                        color = islamic.border
+                    )
+
+                    // Hijri Date Adjustment Row (-2, -1, 0, +1, +2)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("settings_hijri_offset_row"),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "تعديل التاريخ الهجري",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = "يُطبّق على الرئيسية والودجت والأيام البيض",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = islamic.textMuted
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Box {
+                            val offsetLabel = when {
+                                hijriDayOffset > 0 -> "+$hijriDayOffset يوم"
+                                hijriDayOffset < 0 -> "$hijriDayOffset يوم"
+                                else -> "0 (تلقائي)"
+                            }
+                            OutlinedButton(
+                                onClick = {
+                                    performKeyTapHaptic(view)
+                                    hijriOffsetMenuExpanded = true
+                                },
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.testTag("settings_hijri_offset_button")
+                            ) {
+                                Text(offsetLabel)
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Icon(
+                                    imageVector = Icons.Default.KeyboardArrowDown,
+                                    contentDescription = "تعديل التاريخ الهجري",
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                            DropdownMenu(
+                                expanded = hijriOffsetMenuExpanded,
+                                onDismissRequest = { hijriOffsetMenuExpanded = false }
+                            ) {
+                                listOf(-2, -1, 0, 1, 2).forEach { offsetVal ->
+                                    val selected = hijriDayOffset == offsetVal
+                                    val itemLabel = when {
+                                        offsetVal > 0 -> "+$offsetVal يوم"
+                                        offsetVal < 0 -> "$offsetVal يوم"
+                                        else -> "0 (تلقائي)"
+                                    }
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text(
+                                                text = itemLabel,
+                                                fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.Normal,
+                                                color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                            )
+                                        },
+                                        trailingIcon = if (selected) {
+                                            {
+                                                Icon(
+                                                    imageVector = Icons.Default.Check,
+                                                    contentDescription = null,
+                                                    tint = MaterialTheme.colorScheme.primary,
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                            }
+                                        } else null,
+                                        onClick = {
+                                            hijriOffsetMenuExpanded = false
+                                            performKeyTapHaptic(view)
+                                            onSelectHijriDayOffset(offsetVal)
+                                        }
+                                    )
+                                }
+                            }
+                        }
                     }
 
                     HorizontalDivider(
@@ -601,6 +837,49 @@ fun ToolsScreen(
                             },
                             modifier = Modifier.testTag("settings_adhan_silence_flip_switch")
                         )
+                    }
+
+                    HorizontalDivider(
+                        modifier = Modifier.padding(vertical = 10.dp),
+                        color = islamic.border
+                    )
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable {
+                                performKeyTapHaptic(view)
+                                onOpenPrayerAlertsSettings()
+                            }
+                            .padding(vertical = 2.dp)
+                            .testTag("open_prayer_alerts_settings_row"),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "تنبيهات قبل وبعد الأذان",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = "تخصيص أصوات وأوقات التنبيه قبل الصلاة والإقامة",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = islamic.textMuted
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        OutlinedButton(
+                            onClick = {
+                                performKeyTapHaptic(view)
+                                onOpenPrayerAlertsSettings()
+                            },
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.testTag("open_prayer_alerts_settings_button")
+                        ) {
+                            Text("تخصيص")
+                        }
                     }
 
                     HorizontalDivider(

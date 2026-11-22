@@ -38,6 +38,7 @@ import com.example.alarm.PrayerScheduleStore
 import com.example.data.model.AdhanPlaybackStatus
 import com.example.data.model.AdhanPlayerState
 import com.example.data.repository.MuezzinRepository
+import com.example.data.repository.PrayerAlertRepository
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -59,7 +60,10 @@ class AdhanPlaybackService : Service() {
 
     companion object {
         const val ACTION_START_ADHAN = "com.example.action.START_ADHAN"
+        const val ACTION_START_PRE_ADHAN = "com.example.action.START_PRE_ADHAN"
+        const val ACTION_START_IQAMA = "com.example.action.START_IQAMA"
         const val ACTION_START_PREVIEW = "com.example.action.START_ADHAN_PREVIEW"
+        const val ACTION_START_ALERT_PREVIEW = "com.example.action.START_ALERT_PREVIEW"
         const val ACTION_PLAY_PAUSE = "com.example.action.ADHAN_PLAY_PAUSE"
         const val ACTION_SWITCH_FALLBACK = "com.example.action.ADHAN_SWITCH_FALLBACK"
         const val ACTION_RETRY = "com.example.action.ADHAN_RETRY"
@@ -109,6 +113,25 @@ class AdhanPlaybackService : Service() {
                 action = ACTION_START_PREVIEW
                 putExtra(EXTRA_MUEZZIN_ID, muezzinId)
                 putExtra(EXTRA_MUEZZIN_NAME, muezzinName)
+                putStringArrayListExtra(EXTRA_SOURCES, sources)
+            }
+            runCatching {
+                if (isServiceRunning) appCtx.startService(intent)
+                else ContextCompat.startForegroundService(appCtx, intent)
+            }
+        }
+
+        fun startAlertPreview(
+            context: Context,
+            soundId: String,
+            soundName: String,
+            sources: ArrayList<String>
+        ) {
+            val appCtx = context.applicationContext
+            val intent = Intent(appCtx, AdhanPlaybackService::class.java).apply {
+                action = ACTION_START_ALERT_PREVIEW
+                putExtra(EXTRA_MUEZZIN_ID, soundId)
+                putExtra(EXTRA_MUEZZIN_NAME, soundName)
                 putStringArrayListExtra(EXTRA_SOURCES, sources)
             }
             runCatching {
@@ -322,6 +345,18 @@ class AdhanPlaybackService : Service() {
                 handleStartPreview(intent)
                 return START_NOT_STICKY
             }
+            ACTION_START_ALERT_PREVIEW -> {
+                handleStartAlertPreview(intent)
+                return START_NOT_STICKY
+            }
+            ACTION_START_PRE_ADHAN -> {
+                handleStartScheduledPrayerAlert(intent, isIqama = false)
+                return START_NOT_STICKY
+            }
+            ACTION_START_IQAMA -> {
+                handleStartScheduledPrayerAlert(intent, isIqama = true)
+                return START_NOT_STICKY
+            }
             else -> {
                 handleStartScheduledAlarm(intent)
                 return START_NOT_STICKY
@@ -347,11 +382,28 @@ class AdhanPlaybackService : Service() {
         val prayerTime = intent?.getStringExtra(PrayerAlarmScheduler.EXTRA_PRAYER_TIME).orEmpty()
 
         val audioConfig = PrayerScheduleStore.getAdhanAudioForPrayer(this, prayerKey)
-        val timePart = if (prayerTime.isNotBlank()) " ($prayerTime)" else ""
+        val formattedTime = if (prayerTime.contains(":") && !prayerTime.contains("ص") && !prayerTime.contains("م")) {
+            PrayerScheduleStore.format12HourArabic(prayerTime)
+        } else {
+            prayerTime.ifBlank {
+                PrayerScheduleStore.format12HourArabic(PrayerScheduleStore.getTimings(this)[prayerKey].orEmpty())
+            }
+        }
+        val cleanVoiceLabel = if (audioConfig.muezzinName.trim().startsWith("الشيخ") ||
+            audioConfig.muezzinName.trim().startsWith("أذان")
+        ) {
+            "بصوت ${audioConfig.muezzinName.trim()}"
+        } else {
+            "بصوت الشيخ ${audioConfig.muezzinName.trim()}"
+        }
         activeMuezzinId = audioConfig.muezzinId
         activeMuezzinName = audioConfig.muezzinName
-        activeTitle = "حان الآن وقت صلاة $prayerName$timePart"
-        activeSubtitle = "الأذان بصوت ${audioConfig.muezzinName}"
+        activeTitle = "حان الآن موعد أذان $prayerName"
+        activeSubtitle = if (formattedTime.isNotBlank() && formattedTime != "--:--") {
+            "$formattedTime • $cleanVoiceLabel"
+        } else {
+            cleanVoiceLabel
+        }
 
         val cachedMp3 = MuezzinRepository.getCachedAdhanFile(this, audioConfig.muezzinId)
         activeSources = buildList {
@@ -410,6 +462,141 @@ class AdhanPlaybackService : Service() {
 
         val token = ++sessionToken
         trySourceAtIndex(0, token)
+    }
+
+    private fun handleStartScheduledPrayerAlert(intent: Intent?, isIqama: Boolean) {
+        val settings = PrayerScheduleStore.getPrayerAlertsSettings(this)
+        if ((!isIqama && !settings.preAdhanEnabled) || (isIqama && !settings.iqamaEnabled)) {
+            stopPlaybackAndSelf()
+            return
+        }
+
+        playbackMode = PlaybackMode.ALARM
+        isUserPaused = false
+        pausedByTransientFocusLoss = false
+
+        val prayerKey = intent?.getStringExtra(PrayerAlarmScheduler.EXTRA_PRAYER_KEY) ?: "Fajr"
+        val prayerName = intent?.getStringExtra(PrayerAlarmScheduler.EXTRA_PRAYER_NAME) ?: "الصلاة"
+        val offsetMin = intent?.getIntExtra(
+            PrayerAlarmScheduler.EXTRA_OFFSET_MINUTES,
+            if (isIqama) 15 else settings.preAdhanMinutes
+        ) ?: if (isIqama) 15 else settings.preAdhanMinutes
+
+        val soundId = if (isIqama) settings.iqamaSoundId else settings.preAdhanSoundId
+        val soundName = if (isIqama) settings.iqamaSoundName else settings.preAdhanSoundName
+
+        activeMuezzinId = soundId
+        activeMuezzinName = soundName
+        if (isIqama) {
+            activeTitle = "حان وقت إقامة صلاة $prayerName"
+            activeSubtitle = "أقيمت الصلاة • $soundName"
+        } else {
+            activeTitle = "اقتربت صلاة $prayerName"
+            activeSubtitle = "متبقي $offsetMin دقيقة على الأذان • $soundName"
+        }
+
+        activeSources = buildList {
+            if (!isIqama && settings.preAdhanIsPerPrayer) {
+                val perPrayerCached = PrayerAlertRepository.getCachedPerPrayerAlertFile(
+                    context = this@AdhanPlaybackService,
+                    soundId = soundId,
+                    prayerKey = prayerKey
+                )
+                if (perPrayerCached.exists() && perPrayerCached.length() > 0L) {
+                    add(perPrayerCached.absolutePath)
+                }
+                val perPrayerUrl = settings.preAdhanUrlForPrayer(prayerKey)
+                if (perPrayerUrl.isNotBlank()) {
+                    add(perPrayerUrl)
+                }
+            } else {
+                val cachedFile = PrayerAlertRepository.getCachedAlertFile(this@AdhanPlaybackService, soundId)
+                if (cachedFile.exists() && cachedFile.length() > 0L) {
+                    add(cachedFile.absolutePath)
+                }
+                val soundUrl = if (isIqama) settings.iqamaSoundUrl else settings.preAdhanSoundUrl
+                if (soundUrl.isNotBlank()) {
+                    add(soundUrl)
+                }
+            }
+        }.distinct()
+        activeSourceIndex = 0
+
+        if (!promoteToForeground()) return
+
+        QuranMediaEngine.pauseFromSystem()
+        acquireWakeLock()
+        scheduleSafetyTimeout()
+
+        val token = ++sessionToken
+        if (activeSources.isEmpty()) {
+            playSystemNotificationToneFallback(token)
+        } else {
+            trySourceAtIndex(0, token)
+        }
+    }
+
+    private fun handleStartAlertPreview(intent: Intent) {
+        playbackMode = PlaybackMode.MEDIA
+        isUserPaused = false
+        pausedByTransientFocusLoss = false
+
+        activeMuezzinId = intent.getStringExtra(EXTRA_MUEZZIN_ID).orEmpty()
+        activeMuezzinName = intent.getStringExtra(EXTRA_MUEZZIN_NAME).orEmpty().ifBlank { "صوت التنبيه" }
+        activeTitle = "معاينة التنبيه — $activeMuezzinName"
+        activeSubtitle = "رفيق المسلم • تنبيهات قبل وبعد الأذان"
+        activeSources = intent.getStringArrayListExtra(EXTRA_SOURCES).orEmpty().filter { it.isNotBlank() }
+        activeSourceIndex = 0
+
+        if (!promoteToForeground()) return
+
+        QuranMediaEngine.pauseFromSystem()
+        acquireWakeLock()
+        scheduleSafetyTimeout()
+
+        val token = ++sessionToken
+        if (activeSources.isEmpty()) {
+            playSystemNotificationToneFallback(token)
+        } else {
+            trySourceAtIndex(0, token)
+        }
+    }
+
+    private fun playSystemNotificationToneFallback(token: Long) {
+        if (token != sessionToken) return
+        cancelLoadTimeout()
+        releasePlayer()
+        try {
+            val fallbackUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+                ?: run {
+                    stopPlaybackAndSelf()
+                    return
+                }
+            val mp = createConfiguredMediaPlayer().apply {
+                setDataSource(applicationContext, fallbackUri)
+                isLooping = false
+                setOnPreparedListener { player ->
+                    if (token != sessionToken) {
+                        runCatching { player.release() }
+                        return@setOnPreparedListener
+                    }
+                    isPrepared = true
+                    startPreparedPlayer(player, isFallback = true)
+                }
+                setOnCompletionListener {
+                    if (token == sessionToken) stopPlaybackAndSelf()
+                }
+                setOnErrorListener { _, _, _ ->
+                    if (token == sessionToken) stopPlaybackAndSelf()
+                    true
+                }
+                prepareAsync()
+            }
+            mediaPlayer = mp
+        } catch (_: Exception) {
+            stopPlaybackAndSelf()
+        }
     }
 
     private fun trySourceAtIndex(index: Int, token: Long) {
@@ -803,19 +990,12 @@ class AdhanPlaybackService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val playPausePending = serviceActionPendingIntent(ACTION_PLAY_PAUSE, 4104)
         val stopPending = serviceActionPendingIntent(ACTION_STOP_ADHAN, 4103)
 
         val status = _playbackState.value.status
         val isActivePlaying = status == AdhanPlaybackStatus.PLAYING ||
             status == AdhanPlaybackStatus.FALLBACK_PLAYING ||
             status == AdhanPlaybackStatus.LOADING
-        val playPauseIcon = if (isActivePlaying) {
-            android.R.drawable.ic_media_pause
-        } else {
-            android.R.drawable.ic_media_play
-        }
-        val playPauseLabel = if (isActivePlaying) "إيقاف مؤقت" else "استئناف"
 
         val channelId = if (playbackMode == PlaybackMode.ALARM) CHANNEL_ID else MEDIA_CHANNEL_ID
         val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -824,32 +1004,25 @@ class AdhanPlaybackService : Service() {
             Notification.Builder(this)
         }
 
-        val mediaStyle = Notification.MediaStyle()
-            .setShowActionsInCompactView(0, 1)
-        mediaSession?.sessionToken?.let { token ->
-            mediaStyle.setMediaSession(token)
-        }
-
         val category = if (playbackMode == PlaybackMode.ALARM) {
             Notification.CATEGORY_ALARM
         } else {
-            Notification.CATEGORY_TRANSPORT
+            Notification.CATEGORY_SERVICE
         }
 
-        return builder
+        // Clean, dedicated Arabic Adhan notification — NO MediaStyle, NO Play/Pause or scrubber
+        builder
             .setSmallIcon(R.drawable.ic_stat_mosque)
+            .setColor(0xFF0D5C46.toInt())
             .setContentTitle(activeTitle)
             .setContentText(activeSubtitle)
-            .setSubText(if (status == AdhanPlaybackStatus.LOADING) "جاري تحميل الأذان..." else "الأذان")
+            .setStyle(Notification.BigTextStyle().bigText(activeSubtitle))
             .setContentIntent(contentPendingIntent)
             .setDeleteIntent(stopPending)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setOngoing(isActivePlaying)
-            .setShowWhen(false)
+            .setShowWhen(true)
             .setCategory(category)
-            .addAction(
-                Notification.Action.Builder(playPauseIcon, playPauseLabel, playPausePending).build()
-            )
             .addAction(
                 Notification.Action.Builder(
                     android.R.drawable.ic_menu_close_clear_cancel,
@@ -857,8 +1030,14 @@ class AdhanPlaybackService : Service() {
                     stopPending
                 ).build()
             )
-            .setStyle(mediaStyle)
-            .build()
+
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            builder.setPriority(
+                if (playbackMode == PlaybackMode.ALARM) Notification.PRIORITY_HIGH else Notification.PRIORITY_LOW
+            )
+        }
+
+        return builder.build()
     }
 
     private fun serviceActionPendingIntent(action: String, requestCode: Int): PendingIntent {
@@ -1093,6 +1272,10 @@ class AdhanPlaybackService : Service() {
         updateMediaSessionState()
         runCatching {
             ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        }
+        runCatching {
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            nm?.cancel(NOTIFICATION_ID)
         }
         stopSelf()
     }
