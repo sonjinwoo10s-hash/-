@@ -16,8 +16,8 @@ android {
     applicationId = "com.aistudio.rafiqalmuslim.kzmpxr"
     minSdk = 24
     targetSdk = 36
-    versionCode = 11
-    versionName = "1.11"
+    versionCode = 12
+    versionName = "1.12"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -38,6 +38,12 @@ android {
       keyAlias = "androiddebugkey"
       keyPassword = "android"
     }
+    create("rafiqRelease") {
+      storeFile = file("rafiq-key.jks")
+      storePassword = System.getenv("RAFIQ_STORE_PASSWORD") ?: "Rafiq2026!"
+      keyAlias = System.getenv("RAFIQ_KEY_ALIAS") ?: "rafiq"
+      keyPassword = System.getenv("RAFIQ_KEY_PASSWORD") ?: "Rafiq2026!"
+    }
   }
 
   buildTypes {
@@ -54,6 +60,16 @@ android {
       // Do not remove or modify this signingConfig assignment. It is necessary for Android apps in
       // AI Studio.
       signingConfig = signingConfigs.getByName("debugConfig")
+    }
+    create("githubRelease") {
+      isCrunchPngs = false
+      isDebuggable = false
+      isMinifyEnabled = false
+      isShrinkResources = false
+      matchingFallbacks += listOf("release", "debug")
+      if (file("rafiq-key.jks").exists()) {
+        signingConfig = signingConfigs.getByName("rafiqRelease")
+      }
     }
   }
   compileOptions {
