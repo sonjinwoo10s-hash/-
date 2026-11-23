@@ -39,6 +39,7 @@ import com.example.data.model.AdhanPlaybackStatus
 import com.example.data.model.AdhanPlayerState
 import com.example.data.repository.MuezzinRepository
 import com.example.data.repository.PrayerAlertRepository
+import com.example.receiver.AdhanReceiver
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -421,6 +422,7 @@ class AdhanPlaybackService : Service() {
         QuranMediaEngine.pauseFromSystem()
 
         acquireWakeLock()
+        AdhanReceiver.releaseReceiverWakeLock()
         scheduleSafetyTimeout()
 
         val token = ++sessionToken
@@ -526,6 +528,7 @@ class AdhanPlaybackService : Service() {
 
         QuranMediaEngine.pauseFromSystem()
         acquireWakeLock()
+        AdhanReceiver.releaseReceiverWakeLock()
         scheduleSafetyTimeout()
 
         val token = ++sessionToken
@@ -1291,6 +1294,7 @@ class AdhanPlaybackService : Service() {
         releasePlayer()
         abandonAudioFocus()
         releaseWakeLock()
+        AdhanReceiver.releaseReceiverWakeLock()
         _playbackState.value = AdhanPlayerState()
         runCatching {
             mediaSession?.isActive = false

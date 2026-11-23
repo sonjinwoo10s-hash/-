@@ -5,8 +5,10 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import com.example.MainActivity
 import com.example.receiver.AdhanReceiver
 import java.util.Calendar
+import java.util.TimeZone
 
 object PrayerAlarmScheduler {
 
@@ -14,6 +16,8 @@ object PrayerAlarmScheduler {
     const val EXTRA_PRAYER_NAME = "extra_prayer_name"
     const val EXTRA_PRAYER_TIME = "extra_prayer_time"
     const val EXTRA_OFFSET_MINUTES = "extra_offset_minutes"
+
+    private const val SHOW_ALARM_INFO_REQUEST_CODE = 1099
 
     private val adhanRequestCodeMap = mapOf(
         "Fajr" to 1001,
@@ -51,13 +55,19 @@ object PrayerAlarmScheduler {
     private const val FRIDAY_KAHF_REQUEST_CODE = 5001
 
     /**
-     * Schedules all 5 daily Adhan alarms, Pre-Adhan reminders, Post-Adhan Iqama alerts,
-     * optional Auto-Silent DND prayer windows, and the Friday 9:00 AM Surah Al-Kahf reminder.
+     * Schedules all 5 daily Adhan alarms using [AlarmManager.setAlarmClock] (guaranteed to bypass
+     * Night Doze Mode and trigger at the exact second), plus Pre-Adhan reminders, Post-Adhan Iqama
+     * alerts, optional Auto-Silent DND prayer windows, and the Friday 9:00 AM Surah Al-Kahf reminder.
+     *
+     * Always ensures today's timings are fresh for the current date, TimeZone, and DST offset first.
      */
     fun scheduleAllPrayers(context: Context) {
         val appContext = context.applicationContext
         val alarmManager = appContext.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
         val nowMillis = System.currentTimeMillis()
+
+        // Ensure timings are never stale across midnight, DST changes, or timezone shifts
+        PrayerScheduleStore.ensureTodayTimingsFresh(appContext, nowMillis)
         val timings = PrayerScheduleStore.getTimings(appContext)
         val upcoming = PrayerScheduleStore.computeUpcomingPrayerTriggers(appContext, nowMillis)
         val alertSettings = PrayerScheduleStore.getPrayerAlertsSettings(appContext)
@@ -68,7 +78,8 @@ object PrayerAlarmScheduler {
             true
         }
 
-        // 1. Primary 5 daily Adhan alarms
+        // 1. Primary 5 daily Adhan alarms — use AlarmManager.setAlarmClock for exact-to-the-second
+        // Doze-bypass wakeups (rolling chain reschedules again each time AdhanReceiver fires)
         for (prayer in upcoming) {
             val reqCode = adhanRequestCodeMap[prayer.key] ?: continue
             val intent = Intent(appContext, AdhanReceiver::class.java).apply {
@@ -77,7 +88,14 @@ object PrayerAlarmScheduler {
                 putExtra(EXTRA_PRAYER_NAME, prayer.arabicName)
                 putExtra(EXTRA_PRAYER_TIME, prayer.formatted12)
             }
-            scheduleExactBroadcast(appContext, alarmManager, canExact, reqCode, intent, prayer.triggerAtMillis)
+            scheduleAlarmClockBroadcast(appContext, alarmManager, canExact, reqCode, intent, prayer.triggerAtMillis)
+        }
+
+        var tomorrowTimingsCache: Map<String, String>? = null
+        fun tomorrowTimings(): Map<String, String> {
+            return tomorrowTimingsCache
+                ?: PrayerScheduleStore.computeTomorrowAdjustedTimings(appContext, nowMillis)
+                    .also { tomorrowTimingsCache = it }
         }
 
         // 2. Pre-Adhan reminder alarms (default ON, 10 min before Adhan)
@@ -89,19 +107,22 @@ object PrayerAlarmScheduler {
                 val time24 = timings[key] ?: continue
                 val todayPrayerMs = PrayerScheduleStore.parseTodayMillis(time24, nowMillis) ?: continue
                 val todayPreMs = todayPrayerMs - offsetMs
-                val triggerAtMs = if (todayPreMs <= nowMillis + 1500L) {
-                    Calendar.getInstance().apply {
-                        timeInMillis = todayPrayerMs
-                        add(Calendar.DAY_OF_YEAR, 1)
-                    }.timeInMillis - offsetMs
+                val (displayTime24, triggerAtMs) = if (todayPreMs <= nowMillis + 1500L) {
+                    val tmrTime24 = tomorrowTimings()[key] ?: time24
+                    val tmrPrayerMs = PrayerScheduleStore.parseTomorrowMillis(tmrTime24, nowMillis)
+                        ?: Calendar.getInstance(TimeZone.getDefault()).apply {
+                            timeInMillis = todayPrayerMs
+                            add(Calendar.DAY_OF_YEAR, 1)
+                        }.timeInMillis
+                    tmrTime24 to (tmrPrayerMs - offsetMs)
                 } else {
-                    todayPreMs
+                    time24 to todayPreMs
                 }
                 val intent = Intent(appContext, AdhanReceiver::class.java).apply {
                     action = AdhanReceiver.ACTION_TRIGGER_PRE_ADHAN
                     putExtra(EXTRA_PRAYER_KEY, key)
                     putExtra(EXTRA_PRAYER_NAME, arabicName)
-                    putExtra(EXTRA_PRAYER_TIME, PrayerScheduleStore.format12HourArabic(time24))
+                    putExtra(EXTRA_PRAYER_TIME, PrayerScheduleStore.format12HourArabic(displayTime24))
                     putExtra(EXTRA_OFFSET_MINUTES, offsetMin)
                 }
                 scheduleExactBroadcast(appContext, alarmManager, canExact, reqCode, intent, triggerAtMs)
@@ -119,19 +140,22 @@ object PrayerAlarmScheduler {
                 val iqamaOffsetMs = iqamaMin * 60_000L
                 val todayPrayerMs = PrayerScheduleStore.parseTodayMillis(time24, nowMillis) ?: continue
                 val todayIqamaMs = todayPrayerMs + iqamaOffsetMs
-                val triggerAtMs = if (todayIqamaMs <= nowMillis + 1500L) {
-                    Calendar.getInstance().apply {
-                        timeInMillis = todayPrayerMs
-                        add(Calendar.DAY_OF_YEAR, 1)
-                    }.timeInMillis + iqamaOffsetMs
+                val (displayTime24, triggerAtMs) = if (todayIqamaMs <= nowMillis + 1500L) {
+                    val tmrTime24 = tomorrowTimings()[key] ?: time24
+                    val tmrPrayerMs = PrayerScheduleStore.parseTomorrowMillis(tmrTime24, nowMillis)
+                        ?: Calendar.getInstance(TimeZone.getDefault()).apply {
+                            timeInMillis = todayPrayerMs
+                            add(Calendar.DAY_OF_YEAR, 1)
+                        }.timeInMillis
+                    tmrTime24 to (tmrPrayerMs + iqamaOffsetMs)
                 } else {
-                    todayIqamaMs
+                    time24 to todayIqamaMs
                 }
                 val intent = Intent(appContext, AdhanReceiver::class.java).apply {
                     action = AdhanReceiver.ACTION_TRIGGER_IQAMA
                     putExtra(EXTRA_PRAYER_KEY, key)
                     putExtra(EXTRA_PRAYER_NAME, arabicName)
-                    putExtra(EXTRA_PRAYER_TIME, PrayerScheduleStore.format12HourArabic(time24))
+                    putExtra(EXTRA_PRAYER_TIME, PrayerScheduleStore.format12HourArabic(displayTime24))
                     putExtra(EXTRA_OFFSET_MINUTES, iqamaMin)
                 }
                 scheduleExactBroadcast(appContext, alarmManager, canExact, reqCode, intent, triggerAtMs)
@@ -153,10 +177,13 @@ object PrayerAlarmScheduler {
                 val extraOffsetMs = if (atIqama) alertSettings.iqamaMinutesFor(key) * 60_000L else 0L
                 val todayTriggerMs = todayPrayerMs + extraOffsetMs
                 val triggerAtMs = if (todayTriggerMs <= nowMillis + 1500L) {
-                    Calendar.getInstance().apply {
-                        timeInMillis = todayPrayerMs
-                        add(Calendar.DAY_OF_YEAR, 1)
-                    }.timeInMillis + extraOffsetMs
+                    val tmrTime24 = tomorrowTimings()[key] ?: time24
+                    val tmrPrayerMs = PrayerScheduleStore.parseTomorrowMillis(tmrTime24, nowMillis)
+                        ?: Calendar.getInstance(TimeZone.getDefault()).apply {
+                            timeInMillis = todayPrayerMs
+                            add(Calendar.DAY_OF_YEAR, 1)
+                        }.timeInMillis
+                    tmrPrayerMs + extraOffsetMs
                 } else {
                     todayTriggerMs
                 }
@@ -212,7 +239,7 @@ object PrayerAlarmScheduler {
             return
         }
 
-        val target = Calendar.getInstance().apply {
+        val target = Calendar.getInstance(TimeZone.getDefault()).apply {
             timeInMillis = nowMillis
             set(Calendar.HOUR_OF_DAY, 9)
             set(Calendar.MINUTE, 0)
@@ -240,6 +267,53 @@ object PrayerAlarmScheduler {
         cancelBroadcastGroup(appContext, alarmManager, autoSilentStartRequestCodeMap.values, AdhanReceiver.ACTION_AUTO_SILENT_START)
         cancelBroadcastGroup(appContext, alarmManager, listOf(AUTO_SILENT_RESTORE_REQUEST_CODE), AdhanReceiver.ACTION_AUTO_SILENT_RESTORE)
         cancelBroadcastGroup(appContext, alarmManager, listOf(FRIDAY_KAHF_REQUEST_CODE), AdhanReceiver.ACTION_TRIGGER_FRIDAY_KAHF)
+    }
+
+    /**
+     * Uses [AlarmManager.setAlarmClock], the ONLY Android alarm API guaranteed to bypass
+     * Night Doze Mode and fire at the exact second even when the screen is off or the app
+     * has been swiped from Recent Apps.
+     */
+    private fun scheduleAlarmClockBroadcast(
+        appContext: Context,
+        alarmManager: AlarmManager,
+        canExact: Boolean,
+        requestCode: Int,
+        intent: Intent,
+        triggerAtMillis: Long
+    ) {
+        val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        val pendingIntent = PendingIntent.getBroadcast(appContext, requestCode, intent, flags)
+        val showAppIntent = Intent(appContext, MainActivity::class.java).apply {
+            this.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val showPendingIntent = PendingIntent.getActivity(
+            appContext,
+            SHOW_ALARM_INFO_REQUEST_CODE,
+            showAppIntent,
+            flags
+        )
+
+        try {
+            if (canExact) {
+                val alarmClockInfo = AlarmManager.AlarmClockInfo(triggerAtMillis, showPendingIntent)
+                alarmManager.setAlarmClock(alarmClockInfo, pendingIntent)
+            } else {
+                alarmManager.setAndAllowWhileIdle(
+                    AlarmManager.RTC_WAKEUP,
+                    triggerAtMillis,
+                    pendingIntent
+                )
+            }
+        } catch (_: SecurityException) {
+            runCatching {
+                alarmManager.setAndAllowWhileIdle(
+                    AlarmManager.RTC_WAKEUP,
+                    triggerAtMillis,
+                    pendingIntent
+                )
+            }
+        }
     }
 
     private fun scheduleExactBroadcast(

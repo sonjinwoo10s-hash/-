@@ -1,12 +1,17 @@
 package com.example.alarm
 
 import android.Manifest
+import android.annotation.SuppressLint
+import android.app.Activity
 import android.app.AlarmManager
 import android.app.NotificationManager
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
+import android.provider.Settings
 import androidx.core.content.ContextCompat
 import com.example.data.local.MuezzinLibraryData
 import com.example.data.local.OfflineIslamicData
@@ -22,6 +27,7 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 
 data class AdjustedHijriInfo(
     val formattedDate: String,
@@ -65,6 +71,28 @@ data class AdhanAudioConfig(
     val remoteUrl: String?
 )
 
+data class PrayerTimeAdjustments(
+    val globalMinutes: Int = 0,
+    val perPrayerMinutes: Map<String, Int> = emptyMap()
+) {
+    fun prayerOffsetMinutes(prayerKey: String): Int {
+        return (perPrayerMinutes[prayerKey] ?: 0).coerceIn(
+            PrayerScheduleStore.MIN_TIME_ADJUSTMENT_MINUTES,
+            PrayerScheduleStore.MAX_TIME_ADJUSTMENT_MINUTES
+        )
+    }
+
+    fun effectiveOffsetMinutes(prayerKey: String): Int {
+        return (globalMinutes.coerceIn(
+            PrayerScheduleStore.MIN_TIME_ADJUSTMENT_MINUTES,
+            PrayerScheduleStore.MAX_TIME_ADJUSTMENT_MINUTES
+        ) + prayerOffsetMinutes(prayerKey)).coerceIn(-30, 30)
+    }
+
+    val hasAnyAdjustment: Boolean
+        get() = globalMinutes != 0 || perPrayerMinutes.values.any { it != 0 }
+}
+
 data class AppPermissionsStatus(
     val notificationsGranted: Boolean = false,
     val exactAlarmsGranted: Boolean = false,
@@ -73,6 +101,9 @@ data class AppPermissionsStatus(
 ) {
     val allGranted: Boolean
         get() = notificationsGranted && exactAlarmsGranted && batteryOptimizationIgnored && locationGranted
+
+    val adhanReliabilityReady: Boolean
+        get() = exactAlarmsGranted && batteryOptimizationIgnored
 }
 
 object PermissionsHelper {
@@ -126,11 +157,62 @@ object PermissionsHelper {
         ) == PackageManager.PERMISSION_GRANTED
         return fine || coarse
     }
+
+    fun openExactAlarmSettings(context: Context) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val intent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply {
+                data = Uri.parse("package:${context.packageName}")
+                if (context !is Activity) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            val launched = runCatching {
+                context.startActivity(intent)
+                true
+            }.getOrDefault(false)
+            if (!launched) {
+                openAppDetailsSettings(context)
+            }
+        }
+    }
+
+    @SuppressLint("BatteryLife")
+    fun openIgnoreBatteryOptimizationSettings(context: Context) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val directIntent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                data = Uri.parse("package:${context.packageName}")
+                if (context !is Activity) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            val openedDirect = runCatching {
+                context.startActivity(directIntent)
+                true
+            }.getOrDefault(false)
+            if (!openedDirect) {
+                val fallbackIntent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).apply {
+                    if (context !is Activity) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                val openedFallback = runCatching {
+                    context.startActivity(fallbackIntent)
+                    true
+                }.getOrDefault(false)
+                if (!openedFallback) {
+                    openAppDetailsSettings(context)
+                }
+            }
+        }
+    }
+
+    fun openAppDetailsSettings(context: Context) {
+        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+            data = Uri.parse("package:${context.packageName}")
+            if (context !is Activity) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        runCatching { context.startActivity(intent) }
+    }
 }
 
 object OnboardingPrefs {
     private const val PREFS_NAME = "rafiq_permissions_prefs"
     private const val KEY_ONBOARDING_COMPLETED = "onboarding_completed"
+    private const val KEY_RELIABILITY_PROMPT_SHOWN = "adhan_reliability_prompt_shown"
 
     fun isCompleted(context: Context): Boolean {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -140,6 +222,16 @@ object OnboardingPrefs {
     fun setCompleted(context: Context, completed: Boolean) {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().putBoolean(KEY_ONBOARDING_COMPLETED, completed).apply()
+    }
+
+    fun hasShownReliabilityPrompt(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.safeGetBoolean(KEY_RELIABILITY_PROMPT_SHOWN, false)
+    }
+
+    fun setReliabilityPromptShown(context: Context, shown: Boolean) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putBoolean(KEY_RELIABILITY_PROMPT_SHOWN, shown).apply()
     }
 }
 
@@ -158,6 +250,14 @@ object PrayerScheduleStore {
     private const val KEY_MAGHRIB = "timing_Maghrib"
     private const val KEY_ISHA = "timing_Isha"
     private const val KEY_TIMINGS_DATE_STAMP = "timing_date_stamp"
+    private const val KEY_TIMINGS_TZ_ID = "timing_tz_id"
+    private const val KEY_TIMINGS_TZ_OFFSET = "timing_tz_offset_ms"
+
+    // Manual Prayer Time Adjustments (-15..+15 minutes global and per-prayer)
+    const val MIN_TIME_ADJUSTMENT_MINUTES = -15
+    const val MAX_TIME_ADJUSTMENT_MINUTES = 15
+    private const val KEY_TIME_ADJ_GLOBAL = "prayer_time_adj_global"
+    private const val KEY_TIME_ADJ_PREFIX = "prayer_time_adj_"
 
     private const val KEY_DEFAULT_MUEZZIN_ID = "default_muezzin_id"
     private const val KEY_DEFAULT_MUEZZIN_NAME = "default_muezzin_name"
@@ -261,42 +361,68 @@ object PrayerScheduleStore {
         "Isha" to "العشاء"
     )
 
-    fun saveTimings(context: Context, timings24: Map<String, String>) {
+    fun saveTimings(context: Context, rawTimings24: Map<String, String>, nowMillis: Long = System.currentTimeMillis()) {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val todayStamp = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+        val tz = TimeZone.getDefault()
+        val todayStamp = SimpleDateFormat("yyyy-MM-dd", Locale.US).apply {
+            timeZone = tz
+        }.format(Date(nowMillis))
         prefs.edit()
-            .putString(KEY_FAJR, timings24["Fajr"] ?: OfflineIslamicData.fallbackTimings24["Fajr"])
-            .putString(KEY_DHUHR, timings24["Dhuhr"] ?: OfflineIslamicData.fallbackTimings24["Dhuhr"])
-            .putString(KEY_ASR, timings24["Asr"] ?: OfflineIslamicData.fallbackTimings24["Asr"])
-            .putString(KEY_MAGHRIB, timings24["Maghrib"] ?: OfflineIslamicData.fallbackTimings24["Maghrib"])
-            .putString(KEY_ISHA, timings24["Isha"] ?: OfflineIslamicData.fallbackTimings24["Isha"])
+            .putString(KEY_FAJR, rawTimings24["Fajr"] ?: OfflineIslamicData.fallbackTimings24["Fajr"])
+            .putString(KEY_DHUHR, rawTimings24["Dhuhr"] ?: OfflineIslamicData.fallbackTimings24["Dhuhr"])
+            .putString(KEY_ASR, rawTimings24["Asr"] ?: OfflineIslamicData.fallbackTimings24["Asr"])
+            .putString(KEY_MAGHRIB, rawTimings24["Maghrib"] ?: OfflineIslamicData.fallbackTimings24["Maghrib"])
+            .putString(KEY_ISHA, rawTimings24["Isha"] ?: OfflineIslamicData.fallbackTimings24["Isha"])
             .putString(KEY_TIMINGS_DATE_STAMP, todayStamp)
+            .putString(KEY_TIMINGS_TZ_ID, tz.id)
+            .putInt(KEY_TIMINGS_TZ_OFFSET, tz.getOffset(nowMillis))
             .apply()
     }
 
     /**
-     * If the stored timings belong to a previous date (e.g., midnight rolled over while the app was
-     * closed), recomputes today's exact prayer times offline from the saved global coordinates and
-     * calculation method so widgets and background services stay accurate 100% offline.
+     * If the stored timings belong to a previous date, timezone, or DST offset (e.g., midnight
+     * rolled over, daylight saving shifted, or the user traveled while the app was closed),
+     * recomputes today's exact prayer times offline from the saved global coordinates and
+     * calculation method so alarms, widgets, and background services never use stale times.
      */
-    fun ensureTodayTimingsFresh(context: Context, nowMillis: Long = System.currentTimeMillis()) {
+    fun ensureTodayTimingsFresh(
+        context: Context,
+        nowMillis: Long = System.currentTimeMillis(),
+        forceRecalculate: Boolean = false
+    ) {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val todayStamp = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date(nowMillis))
+        val tz = TimeZone.getDefault()
+        val todayStamp = SimpleDateFormat("yyyy-MM-dd", Locale.US).apply {
+            timeZone = tz
+        }.format(Date(nowMillis))
+        val currentTzId = tz.id
+        val currentTzOffset = tz.getOffset(nowMillis)
+
         val savedStamp = prefs.safeGetString(KEY_TIMINGS_DATE_STAMP, null)
-        if (savedStamp == todayStamp) return
+        val savedTzId = prefs.safeGetString(KEY_TIMINGS_TZ_ID, null)
+        val savedTzOffset = prefs.safeGetInt(KEY_TIMINGS_TZ_OFFSET, Int.MIN_VALUE)
+
+        if (!forceRecalculate &&
+            savedStamp == todayStamp &&
+            savedTzId == currentTzId &&
+            savedTzOffset == currentTzOffset
+        ) {
+            return
+        }
+
         val loc = getGlobalLocation(context)
         val method = PrayerCalculationMethod.fromId(loc.calculationMethodId)
-        val cal = Calendar.getInstance().apply { timeInMillis = nowMillis }
+        val cal = Calendar.getInstance(tz).apply { timeInMillis = nowMillis }
         val fresh = AstronomicalPrayerCalculator.calculateTimings24(
             latitude = loc.lat,
             longitude = loc.lng,
             dateCalendar = cal,
             method = method
         )
-        saveTimings(context, fresh)
+        saveTimings(context, fresh, nowMillis)
     }
 
-    fun getTimings(context: Context): Map<String, String> {
+    fun getRawTimings(context: Context): Map<String, String> {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val fallback = OfflineIslamicData.fallbackTimings24
         return mapOf(
@@ -306,6 +432,90 @@ object PrayerScheduleStore {
             "Maghrib" to (prefs.safeGetString(KEY_MAGHRIB, fallback["Maghrib"]) ?: "17:02"),
             "Isha" to (prefs.safeGetString(KEY_ISHA, fallback["Isha"]) ?: "18:22")
         )
+    }
+
+    fun getTimeAdjustments(context: Context): PrayerTimeAdjustments {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val globalMin = prefs.safeGetInt(KEY_TIME_ADJ_GLOBAL, 0)
+            .coerceIn(MIN_TIME_ADJUSTMENT_MINUTES, MAX_TIME_ADJUSTMENT_MINUTES)
+        val perPrayer = linkedMapOf<String, Int>()
+        for ((key, _) in prayerOrder) {
+            val v = prefs.safeGetInt(KEY_TIME_ADJ_PREFIX + key, 0)
+                .coerceIn(MIN_TIME_ADJUSTMENT_MINUTES, MAX_TIME_ADJUSTMENT_MINUTES)
+            if (v != 0) perPrayer[key] = v
+        }
+        return PrayerTimeAdjustments(
+            globalMinutes = globalMin,
+            perPrayerMinutes = perPrayer
+        )
+    }
+
+    fun saveTimeAdjustments(context: Context, adjustments: PrayerTimeAdjustments) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val editor = prefs.edit().putInt(
+            KEY_TIME_ADJ_GLOBAL,
+            adjustments.globalMinutes.coerceIn(MIN_TIME_ADJUSTMENT_MINUTES, MAX_TIME_ADJUSTMENT_MINUTES)
+        )
+        for ((key, _) in prayerOrder) {
+            val v = (adjustments.perPrayerMinutes[key] ?: 0)
+                .coerceIn(MIN_TIME_ADJUSTMENT_MINUTES, MAX_TIME_ADJUSTMENT_MINUTES)
+            editor.putInt(KEY_TIME_ADJ_PREFIX + key, v)
+        }
+        editor.apply()
+    }
+
+    fun shiftTime24(time24: String, deltaMinutes: Int): String {
+        if (deltaMinutes == 0) return time24
+        val parts = time24.trim().split(":")
+        val hour = parts.getOrNull(0)?.toIntOrNull() ?: return time24
+        val minute = parts.getOrNull(1)?.toIntOrNull() ?: return time24
+        val totalMin = ((hour * 60 + minute + deltaMinutes) % 1440 + 1440) % 1440
+        val newH = totalMin / 60
+        val newM = totalMin % 60
+        return String.format(Locale.US, "%02d:%02d", newH, newM)
+    }
+
+    fun applyTimeAdjustments(
+        rawTimings24: Map<String, String>,
+        adjustments: PrayerTimeAdjustments
+    ): Map<String, String> {
+        if (!adjustments.hasAnyAdjustment) return rawTimings24
+        return rawTimings24.mapValues { (key, time24) ->
+            shiftTime24(time24, adjustments.effectiveOffsetMinutes(key))
+        }
+    }
+
+    /**
+     * Returns today's prayer timings with any user-configured manual minute adjustments applied.
+     */
+    fun getTimings(context: Context): Map<String, String> {
+        val raw = getRawTimings(context)
+        val adj = getTimeAdjustments(context)
+        return applyTimeAdjustments(raw, adj)
+    }
+
+    /**
+     * Computes tomorrow's astronomical prayer timings using the device's current TimeZone
+     * (automatically reflecting DST transitions) and applies the user's manual minute adjustments.
+     */
+    fun computeTomorrowAdjustedTimings(
+        context: Context,
+        nowMillis: Long = System.currentTimeMillis()
+    ): Map<String, String> {
+        val loc = getGlobalLocation(context)
+        val method = PrayerCalculationMethod.fromId(loc.calculationMethodId)
+        val tz = TimeZone.getDefault()
+        val tomorrowCal = Calendar.getInstance(tz).apply {
+            timeInMillis = nowMillis
+            add(Calendar.DAY_OF_YEAR, 1)
+        }
+        val rawTomorrow = AstronomicalPrayerCalculator.calculateTimings24(
+            latitude = loc.lat,
+            longitude = loc.lng,
+            dateCalendar = tomorrowCal,
+            method = method
+        )
+        return applyTimeAdjustments(rawTomorrow, getTimeAdjustments(context))
     }
 
     fun getDefaultMuezzinId(context: Context): String {
@@ -784,13 +994,14 @@ object PrayerScheduleStore {
     }
 
     /**
-     * Parses a 24h "HH:mm" string into today's timestamp in milliseconds (seconds/millis = 0).
+     * Parses a 24h "HH:mm" string into today's timestamp in milliseconds (seconds/millis = 0)
+     * using the device's current TimeZone (including automatic DST).
      */
     fun parseTodayMillis(time24: String, nowMillis: Long = System.currentTimeMillis()): Long? {
         val parts = time24.trim().split(":")
         val hour = parts.getOrNull(0)?.toIntOrNull() ?: return null
         val minute = parts.getOrNull(1)?.toIntOrNull() ?: return null
-        return Calendar.getInstance().apply {
+        return Calendar.getInstance(TimeZone.getDefault()).apply {
             timeInMillis = nowMillis
             set(Calendar.HOUR_OF_DAY, hour)
             set(Calendar.MINUTE, minute)
@@ -801,29 +1012,39 @@ object PrayerScheduleStore {
 
     /**
      * Builds the next upcoming trigger timestamp for each of the 5 daily prayers.
-     * If today's time has already passed (<= now), rolls forward by 1 day to tomorrow.
+     * Ensures today's cached timings are fresh for the current date/timezone/DST first,
+     * and when today's prayer has already passed, calculates tomorrow's exact astronomical
+     * time (including DST & manual minute adjustments) rather than reusing today's time.
      */
     fun computeUpcomingPrayerTriggers(
         context: Context,
         nowMillis: Long = System.currentTimeMillis()
     ): List<ScheduledPrayerInfo> {
-        val timings = getTimings(context)
+        ensureTodayTimingsFresh(context, nowMillis)
+        val todayTimings = getTimings(context)
+        var tomorrowTimingsCache: Map<String, String>? = null
+
         return prayerOrder.mapNotNull { (key, arabicName) ->
-            val time24 = timings[key] ?: return@mapNotNull null
-            val todayMillis = parseTodayMillis(time24, nowMillis) ?: return@mapNotNull null
-            val triggerMillis = if (todayMillis <= nowMillis + 1500L) {
-                Calendar.getInstance().apply {
-                    timeInMillis = todayMillis
-                    add(Calendar.DAY_OF_YEAR, 1)
-                }.timeInMillis
+            val todayTime24 = todayTimings[key] ?: return@mapNotNull null
+            val todayMillis = parseTodayMillis(todayTime24, nowMillis) ?: return@mapNotNull null
+            val (effectiveTime24, triggerMillis) = if (todayMillis <= nowMillis + 1500L) {
+                val tomorrowMap = tomorrowTimingsCache
+                    ?: computeTomorrowAdjustedTimings(context, nowMillis).also { tomorrowTimingsCache = it }
+                val tomorrowTime24 = tomorrowMap[key] ?: todayTime24
+                val tomorrowMs = parseTomorrowMillis(tomorrowTime24, nowMillis)
+                    ?: Calendar.getInstance(TimeZone.getDefault()).apply {
+                        timeInMillis = todayMillis
+                        add(Calendar.DAY_OF_YEAR, 1)
+                    }.timeInMillis
+                tomorrowTime24 to tomorrowMs
             } else {
-                todayMillis
+                todayTime24 to todayMillis
             }
             ScheduledPrayerInfo(
                 key = key,
                 arabicName = arabicName,
-                time24 = time24,
-                formatted12 = format12HourArabic(time24),
+                time24 = effectiveTime24,
+                formatted12 = format12HourArabic(effectiveTime24),
                 triggerAtMillis = triggerMillis
             )
         }
@@ -960,7 +1181,7 @@ object PrayerScheduleStore {
         val parts = time24.trim().split(":")
         val hour = parts.getOrNull(0)?.toIntOrNull() ?: return null
         val minute = parts.getOrNull(1)?.toIntOrNull() ?: return null
-        return Calendar.getInstance().apply {
+        return Calendar.getInstance(TimeZone.getDefault()).apply {
             timeInMillis = nowMillis
             add(Calendar.DAY_OF_YEAR, 1)
             set(Calendar.HOUR_OF_DAY, hour)

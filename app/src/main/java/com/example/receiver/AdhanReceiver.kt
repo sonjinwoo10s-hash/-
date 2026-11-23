@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.media.AudioManager
 import android.os.Build
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.example.MainActivity
@@ -22,6 +23,10 @@ import com.example.widget.PrayerTimesWidgetProvider
 /**
  * Triggered by AlarmManager at each daily prayer time, Pre-Adhan reminder, Iqama alert,
  * Auto-Silent DND start/restore window, and weekly Friday Surah Al-Kahf reminder.
+ *
+ * Immediately acquires a short PARTIAL_WAKE_LOCK (2 min timeout) so deep-sleeping devices
+ * cannot return to Doze before AdhanPlaybackService starts in the foreground and the next
+ * rolling setAlarmClock alarm is scheduled.
  */
 class AdhanReceiver : BroadcastReceiver() {
 
@@ -35,33 +40,73 @@ class AdhanReceiver : BroadcastReceiver() {
 
         private const val KAHF_CHANNEL_ID = "rafiq_friday_kahf_channel"
         private const val KAHF_NOTIFICATION_ID = 5001
+        private const val RECEIVER_WAKELOCK_TIMEOUT_MS = 2 * 60 * 1000L // 2 minutes safety ceiling
+
+        private val wakeLockLock = Any()
+        @Volatile
+        private var receiverWakeLock: PowerManager.WakeLock? = null
+
+        fun acquireReceiverWakeLock(context: Context) {
+            synchronized(wakeLockLock) {
+                runCatching {
+                    val pm = context.applicationContext.getSystemService(Context.POWER_SERVICE) as? PowerManager
+                        ?: return
+                    val existing = receiverWakeLock
+                    if (existing != null && existing.isHeld) {
+                        existing.acquire(RECEIVER_WAKELOCK_TIMEOUT_MS)
+                        return
+                    }
+                    receiverWakeLock = pm.newWakeLock(
+                        PowerManager.PARTIAL_WAKE_LOCK,
+                        "RafiqAlMuslim:AdhanReceiverWakeLock"
+                    ).apply {
+                        setReferenceCounted(false)
+                        acquire(RECEIVER_WAKELOCK_TIMEOUT_MS)
+                    }
+                }
+            }
+        }
+
+        fun releaseReceiverWakeLock() {
+            synchronized(wakeLockLock) {
+                runCatching {
+                    if (receiverWakeLock?.isHeld == true) {
+                        receiverWakeLock?.release()
+                    }
+                }
+                receiverWakeLock = null
+            }
+        }
     }
 
     override fun onReceive(context: Context, intent: Intent?) {
-        runCatching {
+        val appContext = context.applicationContext
+        acquireReceiverWakeLock(appContext)
+        var handedOffToForegroundService = false
+        try {
             val action = intent?.action ?: ACTION_TRIGGER_ADHAN
 
             when (action) {
                 ACTION_AUTO_SILENT_START -> {
                     handleAutoSilentStart(
-                        context = context,
+                        context = appContext,
                         durationMin = intent?.getIntExtra(
                             PrayerAlarmScheduler.EXTRA_OFFSET_MINUTES,
-                            PrayerScheduleStore.getAutoSilentDurationMinutes(context)
+                            PrayerScheduleStore.getAutoSilentDurationMinutes(appContext)
                         ) ?: 15
                     )
-                    runCatching { PrayerAlarmScheduler.scheduleAllPrayers(context) }
+                    runCatching { PrayerAlarmScheduler.scheduleAllPrayers(appContext) }
                     return
                 }
 
                 ACTION_AUTO_SILENT_RESTORE -> {
-                    handleAutoSilentRestore(context)
+                    handleAutoSilentRestore(appContext)
                     return
                 }
 
                 ACTION_TRIGGER_FRIDAY_KAHF -> {
-                    postFridayKahfNotification(context)
-                    runCatching { PrayerAlarmScheduler.scheduleAllPrayers(context) }
+                    postFridayKahfNotification(appContext)
+                    runCatching { PrayerAlarmScheduler.scheduleAllPrayers(appContext) }
                     return
                 }
             }
@@ -77,7 +122,7 @@ class AdhanReceiver : BroadcastReceiver() {
                 else -> AdhanPlaybackService.ACTION_START_ADHAN
             }
 
-            val serviceIntent = Intent(context, AdhanPlaybackService::class.java).apply {
+            val serviceIntent = Intent(appContext, AdhanPlaybackService::class.java).apply {
                 this.action = serviceAction
                 putExtra(PrayerAlarmScheduler.EXTRA_PRAYER_KEY, prayerKey)
                 putExtra(PrayerAlarmScheduler.EXTRA_PRAYER_NAME, prayerName)
@@ -85,18 +130,25 @@ class AdhanReceiver : BroadcastReceiver() {
                 putExtra(PrayerAlarmScheduler.EXTRA_OFFSET_MINUTES, offsetMinutes)
             }
 
-            runCatching {
-                ContextCompat.startForegroundService(context, serviceIntent)
-            }
+            handedOffToForegroundService = runCatching {
+                ContextCompat.startForegroundService(appContext, serviceIntent)
+                true
+            }.getOrDefault(false)
 
-            // Reschedule all daily Adhan, Pre-Adhan, Iqama, Auto-Silent & Friday alarms
-            runCatching { PrayerAlarmScheduler.scheduleAllPrayers(context) }
+            // Rolling chain: immediately recompute fresh timings & reschedule next upcoming alarms
+            runCatching { PrayerAlarmScheduler.scheduleAllPrayers(appContext) }
 
             // Update the persistent next-prayer countdown notification if enabled
-            runCatching { PrayerCountdownService.syncState(context) }
+            runCatching { PrayerCountdownService.syncState(appContext) }
 
             // Refresh Home Screen Prayer Times widgets
-            runCatching { PrayerTimesWidgetProvider.updateAllWidgets(context) }
+            runCatching { PrayerTimesWidgetProvider.updateAllWidgets(appContext) }
+        } catch (_: Throwable) {
+            // Never crash from BroadcastReceiver
+        } finally {
+            if (!handedOffToForegroundService) {
+                releaseReceiverWakeLock()
+            }
         }
     }
 

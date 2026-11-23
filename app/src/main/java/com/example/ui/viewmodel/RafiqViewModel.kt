@@ -8,13 +8,16 @@ import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.BuildConfig
+import com.example.alarm.AppPermissionsStatus
 import com.example.alarm.AstronomicalPrayerCalculator
+import com.example.alarm.OnboardingPrefs
 import com.example.alarm.PermissionsHelper
 import com.example.alarm.PrayerAlarmScheduler
 import com.example.alarm.PrayerCalculationMethod
 import com.example.alarm.PrayerLogStats
 import com.example.alarm.PrayerLogStore
 import com.example.alarm.PrayerScheduleStore
+import com.example.alarm.PrayerTimeAdjustments
 import com.example.alarm.QadaaItem
 import com.example.audio.AdhanAudioPlayer
 import com.example.audio.AudioPlayerState
@@ -587,6 +590,20 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
     private val _aboutCopyrightOpen = MutableStateFlow(false)
     val aboutCopyrightOpen: StateFlow<Boolean> = _aboutCopyrightOpen.asStateFlow()
 
+    private val _prayerTimeAdjustments = MutableStateFlow(
+        PrayerScheduleStore.getTimeAdjustments(application.applicationContext)
+    )
+    val prayerTimeAdjustments: StateFlow<PrayerTimeAdjustments> = _prayerTimeAdjustments.asStateFlow()
+
+    private val _permissionsStatus = MutableStateFlow(
+        runCatching { PermissionsHelper.checkAll(application.applicationContext) }
+            .getOrDefault(AppPermissionsStatus())
+    )
+    val permissionsStatus: StateFlow<AppPermissionsStatus> = _permissionsStatus.asStateFlow()
+
+    private val _showReliabilityPrompt = MutableStateFlow(false)
+    val showReliabilityPrompt: StateFlow<Boolean> = _showReliabilityPrompt.asStateFlow()
+
     val lastHadithResume: StateFlow<Pair<HadithBookCollection, Int>?> = prefs.lastHadithResumeFlow
         .map { pair ->
             if (pair == null) null
@@ -594,6 +611,9 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
+    private var rawCurrentTimings24: Map<String, String> = OfflineIslamicData.fallbackTimings24
+    private var rawSelectedDateTimings24: Map<String, String> = OfflineIslamicData.fallbackTimings24
+    private var rawNextDayTimings24: Map<String, String> = OfflineIslamicData.fallbackTimings24
     private var currentTimings24: Map<String, String> = OfflineIslamicData.fallbackTimings24
     private var selectedDateTimings24: Map<String, String> = OfflineIslamicData.fallbackTimings24
     private var selectedPrayerDateKey: String = AstronomicalPrayerCalculator.todayDateKey()
@@ -751,6 +771,17 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 refreshPrayerTrackerState()
                 PrayerTimesWidgetProvider.scheduleDebouncedWidgetUpdate(appCtx, delayMs = 600L)
+                // One-time startup reliability check: prompt once if battery optimization or exact alarms missing
+                val shouldPromptReliability = withContext(Dispatchers.IO) {
+                    val status = PermissionsHelper.checkAll(appCtx)
+                    _permissionsStatus.value = status
+                    OnboardingPrefs.isCompleted(appCtx) &&
+                        !OnboardingPrefs.hasShownReliabilityPrompt(appCtx) &&
+                        !status.adhanReliabilityReady
+                }
+                if (shouldPromptReliability) {
+                    _showReliabilityPrompt.value = true
+                }
             }
         }
         // Keep persistent countdown notification service synced with user preference
@@ -1171,6 +1202,108 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
         emitToast("تم تعديل التاريخ الهجري: $label")
     }
 
+    fun refreshPermissionsStatus() {
+        viewModelScope.launch {
+            val appCtx = getApplication<Application>().applicationContext
+            val status = withContext(Dispatchers.IO) {
+                runCatching { PermissionsHelper.checkAll(appCtx) }.getOrDefault(AppPermissionsStatus())
+            }
+            _permissionsStatus.value = status
+            if (status.adhanReliabilityReady) {
+                if (_showReliabilityPrompt.value) {
+                    _showReliabilityPrompt.value = false
+                    withContext(Dispatchers.IO) {
+                        runCatching { OnboardingPrefs.setReliabilityPromptShown(appCtx, true) }
+                    }
+                }
+                withContext(Dispatchers.IO) {
+                    runCatching { PrayerAlarmScheduler.scheduleAllPrayers(appCtx) }
+                }
+            }
+        }
+    }
+
+    fun dismissReliabilityPrompt() {
+        _showReliabilityPrompt.value = false
+        val appCtx = getApplication<Application>().applicationContext
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { OnboardingPrefs.setReliabilityPromptShown(appCtx, true) }
+        }
+    }
+
+    fun setGlobalPrayerTimeAdjustment(minutes: Int) {
+        val clamped = minutes.coerceIn(
+            PrayerScheduleStore.MIN_TIME_ADJUSTMENT_MINUTES,
+            PrayerScheduleStore.MAX_TIME_ADJUSTMENT_MINUTES
+        )
+        val updated = _prayerTimeAdjustments.value.copy(globalMinutes = clamped)
+        val label = formatMinuteDeltaArabic(clamped)
+        applyAndPersistTimeAdjustments(updated, "تم ضبط التعديل العام للمواقيت ($label)")
+    }
+
+    fun setPerPrayerTimeAdjustment(prayerKey: String, minutes: Int) {
+        val clamped = minutes.coerceIn(
+            PrayerScheduleStore.MIN_TIME_ADJUSTMENT_MINUTES,
+            PrayerScheduleStore.MAX_TIME_ADJUSTMENT_MINUTES
+        )
+        val current = _prayerTimeAdjustments.value
+        val nextMap = current.perPrayerMinutes.toMutableMap()
+        if (clamped == 0) {
+            nextMap.remove(prayerKey)
+        } else {
+            nextMap[prayerKey] = clamped
+        }
+        val updated = current.copy(perPrayerMinutes = nextMap)
+        val prayerAr = prayerMeta.firstOrNull { it.first == prayerKey }?.second ?: prayerKey
+        applyAndPersistTimeAdjustments(updated, "تم تعديل وقت $prayerAr (${formatMinuteDeltaArabic(clamped)})")
+    }
+
+    fun resetPrayerTimeAdjustments() {
+        applyAndPersistTimeAdjustments(
+            PrayerTimeAdjustments(),
+            "تمت إعادة جميع تعديلات الدقائق للوضع الافتراضي (0)"
+        )
+    }
+
+    private fun formatMinuteDeltaArabic(minutes: Int): String = when {
+        minutes > 0 -> "+$minutes د"
+        minutes < 0 -> "$minutes د"
+        else -> "0 د"
+    }
+
+    private fun applyAndPersistTimeAdjustments(updated: PrayerTimeAdjustments, toastMsg: String) {
+        val appCtx = getApplication<Application>().applicationContext
+        _prayerTimeAdjustments.value = updated
+        reapplyManualTimeAdjustmentsToState()
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { PrayerScheduleStore.saveTimeAdjustments(appCtx, updated) }
+            runCatching { PrayerAlarmScheduler.scheduleAllPrayers(appCtx) }
+            runCatching { PrayerCountdownService.syncState(appCtx) }
+        }
+        PrayerTimesWidgetProvider.scheduleDebouncedWidgetUpdate(appCtx)
+        emitToast(toastMsg)
+    }
+
+    private fun reapplyManualTimeAdjustmentsToState() {
+        val adj = _prayerTimeAdjustments.value
+        currentTimings24 = PrayerScheduleStore.applyTimeAdjustments(rawCurrentTimings24, adj)
+        selectedDateTimings24 = PrayerScheduleStore.applyTimeAdjustments(rawSelectedDateTimings24, adj)
+        val adjustedNextDay = PrayerScheduleStore.applyTimeAdjustments(rawNextDayTimings24, adj)
+        val targetCal = AstronomicalPrayerCalculator.parseDateKey(selectedPrayerDateKey)
+        val nightTimes = PrayerScheduleStore.computeIslamicNightTimes(
+            todayMaghrib24 = selectedDateTimings24["Maghrib"] ?: "17:02",
+            tomorrowFajr24 = adjustedNextDay["Fajr"] ?: selectedDateTimings24["Fajr"] ?: "04:55",
+            nowMillis = targetCal.timeInMillis
+        )
+        _prayerState.update {
+            it.copy(
+                islamicMidnightFormatted = nightTimes.islamicMidnightFormatted,
+                lastThirdNightFormatted = nightTimes.lastThirdNightFormatted
+            )
+        }
+        updatePrayerCountdownOnce()
+    }
+
     fun setAutoSilentEnabled(enabled: Boolean) {
         val appCtx = getApplication<Application>().applicationContext
         if (enabled && !PrayerScheduleStore.isDndPermissionGranted(appCtx)) {
@@ -1390,10 +1523,15 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
 
-            selectedDateTimings24 = offlineTargetTimings
-            if (isToday || currentTimings24 === OfflineIslamicData.fallbackTimings24) {
-                currentTimings24 = offlineTodayTimings
+            val adjustments = _prayerTimeAdjustments.value
+            rawSelectedDateTimings24 = offlineTargetTimings
+            rawNextDayTimings24 = offlineNextDayTimings
+            if (isToday || rawCurrentTimings24 === OfflineIslamicData.fallbackTimings24) {
+                rawCurrentTimings24 = offlineTodayTimings
             }
+            selectedDateTimings24 = PrayerScheduleStore.applyTimeAdjustments(rawSelectedDateTimings24, adjustments)
+            currentTimings24 = PrayerScheduleStore.applyTimeAdjustments(rawCurrentTimings24, adjustments)
+            val adjustedNextDayTimings = PrayerScheduleStore.applyTimeAdjustments(offlineNextDayTimings, adjustments)
 
             val performedForDate = if (isFuture) {
                 emptySet()
@@ -1402,8 +1540,8 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             val offlineNightTimes = PrayerScheduleStore.computeIslamicNightTimes(
-                todayMaghrib24 = offlineTargetTimings["Maghrib"] ?: "17:02",
-                tomorrowFajr24 = offlineNextDayTimings["Fajr"] ?: "04:55",
+                todayMaghrib24 = selectedDateTimings24["Maghrib"] ?: "17:02",
+                tomorrowFajr24 = adjustedNextDayTimings["Fajr"] ?: "04:55",
                 nowMillis = targetCal.timeInMillis
             )
 
@@ -1426,11 +1564,12 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
             }
             updatePrayerCountdownOnce()
 
-            // Save today's baseline schedules asynchronously so alarms/widgets stay accurate without blocking UI
+            // Save today's raw baseline schedules asynchronously (getTimings applies manual adjustments cleanly)
             if (isToday) {
                 lastObservedPrayerDateKey = todayStr
+                val rawSnapshot = rawCurrentTimings24
                 withContext(Dispatchers.IO) {
-                    runCatching { PrayerScheduleStore.saveTimings(appCtx, currentTimings24) }
+                    runCatching { PrayerScheduleStore.saveTimings(appCtx, rawSnapshot) }
                     runCatching { PrayerScheduleStore.saveDisplayMetadata(appCtx, hijriInfo.formattedDate, location.displayLabel) }
                     runCatching { PrayerAlarmScheduler.scheduleAllPrayers(appCtx) }
                     runCatching { PrayerCountdownService.syncState(appCtx) }
@@ -1460,11 +1599,14 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
                     "Maghrib" to cleanTime(t.Maghrib),
                     "Isha" to cleanTime(t.Isha)
                 )
+                val latestAdj = _prayerTimeAdjustments.value
                 if (selectedPrayerDateKey == dateKey) {
-                    selectedDateTimings24 = apiTimings
+                    rawSelectedDateTimings24 = apiTimings
+                    selectedDateTimings24 = PrayerScheduleStore.applyTimeAdjustments(apiTimings, latestAdj)
                 }
                 if (isToday) {
-                    currentTimings24 = apiTimings
+                    rawCurrentTimings24 = apiTimings
+                    currentTimings24 = PrayerScheduleStore.applyTimeAdjustments(apiTimings, latestAdj)
                 }
 
                 val h = response.data.date.hijri
@@ -1474,9 +1616,11 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
                     "${h.weekday.ar}، ${h.day} ${h.month.ar} ${h.year} هـ"
                 }
 
+                val adjustedApiTimings = PrayerScheduleStore.applyTimeAdjustments(apiTimings, latestAdj)
+                val adjustedTomorrow = PrayerScheduleStore.applyTimeAdjustments(offlineNextDayTimings, latestAdj)
                 val nightTimes = PrayerScheduleStore.computeIslamicNightTimes(
-                    todayMaghrib24 = apiTimings["Maghrib"] ?: "17:02",
-                    tomorrowFajr24 = offlineNextDayTimings["Fajr"] ?: apiTimings["Fajr"] ?: "04:55",
+                    todayMaghrib24 = adjustedApiTimings["Maghrib"] ?: "17:02",
+                    tomorrowFajr24 = adjustedTomorrow["Fajr"] ?: adjustedApiTimings["Fajr"] ?: "04:55",
                     nowMillis = targetCal.timeInMillis
                 )
 
@@ -1497,8 +1641,9 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
                 }
 
                 if (isToday) {
+                    val rawSnapshot = rawCurrentTimings24
                     withContext(Dispatchers.IO) {
-                        runCatching { PrayerScheduleStore.saveTimings(appCtx, currentTimings24) }
+                        runCatching { PrayerScheduleStore.saveTimings(appCtx, rawSnapshot) }
                         runCatching { PrayerScheduleStore.saveDisplayMetadata(appCtx, finalHijriText, location.displayLabel) }
                         runCatching { PrayerAlarmScheduler.scheduleAllPrayers(appCtx) }
                         runCatching { PrayerCountdownService.syncState(appCtx) }
@@ -1571,7 +1716,12 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
         if (nextKey == null) {
             nextKey = "Fajr"
             nextArabic = "الفجر"
-            val parts = (currentTimings24["Fajr"] ?: "05:00").split(":")
+            val adjustedNextDay = PrayerScheduleStore.applyTimeAdjustments(
+                rawNextDayTimings24,
+                _prayerTimeAdjustments.value
+            )
+            val tomorrowFajrStr = adjustedNextDay["Fajr"] ?: currentTimings24["Fajr"] ?: "05:00"
+            val parts = tomorrowFajrStr.split(":")
             val h = parts.getOrNull(0)?.toIntOrNull() ?: 5
             val m = parts.getOrNull(1)?.toIntOrNull() ?: 0
             targetCal = Calendar.getInstance().apply {
@@ -1621,9 +1771,13 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
 
         _prayerState.update { state ->
             val updatedNight = if (isToday) {
+                val adjNext = PrayerScheduleStore.applyTimeAdjustments(
+                    rawNextDayTimings24,
+                    _prayerTimeAdjustments.value
+                )
                 PrayerScheduleStore.computeIslamicNightTimes(
                     todayMaghrib24 = currentTimings24["Maghrib"] ?: "17:02",
-                    tomorrowFajr24 = currentTimings24["Fajr"] ?: "04:55",
+                    tomorrowFajr24 = adjNext["Fajr"] ?: currentTimings24["Fajr"] ?: "04:55",
                     nowMillis = now.timeInMillis
                 )
             } else null

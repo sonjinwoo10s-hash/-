@@ -1,5 +1,6 @@
 package com.example.ui
 
+import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -24,15 +26,21 @@ import androidx.compose.material.icons.automirrored.filled.Article
 import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.automirrored.outlined.Article
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
+import androidx.compose.material.icons.filled.Alarm
+import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.NightlightRound
+import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.outlined.Explore
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Schedule
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -42,12 +50,15 @@ import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.NavigationRailItemDefaults
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -56,10 +67,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.alarm.AppPermissionsStatus
+import com.example.alarm.PermissionsHelper
 import com.example.data.local.OfflineIslamicData
 import com.example.data.local.PersistentOfflineStorage
 import com.example.ui.components.AboutCopyrightModal
@@ -157,8 +174,23 @@ fun RafiqApp(viewModel: RafiqViewModel) {
     val appUpdateState by viewModel.appUpdateState.collectAsStateWithLifecycle()
     val aboutCopyrightOpen by viewModel.aboutCopyrightOpen.collectAsStateWithLifecycle()
     val lastHadithResume by viewModel.lastHadithResume.collectAsStateWithLifecycle()
+    val prayerTimeAdjustments by viewModel.prayerTimeAdjustments.collectAsStateWithLifecycle()
+    val permissionsStatus by viewModel.permissionsStatus.collectAsStateWithLifecycle()
+    val showReliabilityPrompt by viewModel.showReliabilityPrompt.collectAsStateWithLifecycle()
 
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val snackbarHostState = remember { SnackbarHostState() }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.refreshPermissionsStatus()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     LaunchedEffect(Unit) {
         viewModel.toastEvents.collect { msg ->
@@ -470,6 +502,8 @@ fun RafiqApp(viewModel: RafiqViewModel) {
                                     globalLocation = globalLocation,
                                     prayerLogStats = prayerLogStats,
                                     hijriDayOffset = hijriDayOffset,
+                                    prayerTimeAdjustments = prayerTimeAdjustments,
+                                    permissionsStatus = permissionsStatus,
                                     activeMuezzin = activeDefaultMuezzin,
                                     fajrAlarmSettings = fajrAlarmSettings,
                                     fajrWakeupTime = fajrWakeupTime,
@@ -479,6 +513,9 @@ fun RafiqApp(viewModel: RafiqViewModel) {
                                     isCheckingAppUpdate = appUpdateState.isChecking,
                                     onOpenGlobalLocationSettings = { viewModel.openGlobalLocationModal(includeMethodOverride = true) },
                                     onSelectHijriDayOffset = viewModel::setHijriDayOffset,
+                                    onSetGlobalPrayerTimeAdjustment = viewModel::setGlobalPrayerTimeAdjustment,
+                                    onSetPerPrayerTimeAdjustment = viewModel::setPerPrayerTimeAdjustment,
+                                    onResetPrayerTimeAdjustments = viewModel::resetPrayerTimeAdjustments,
                                     onOpenMuezzinLibrary = viewModel::openMuezzinLibrary,
                                     onOpenFajrAlarm = viewModel::openFajrAlarmSettings,
                                     onOpenPrayerAlertsSettings = viewModel::openPrayerAlertsSettings,
@@ -648,8 +685,102 @@ fun RafiqApp(viewModel: RafiqViewModel) {
                 onPermissionRequired = viewModel::markInstallPermissionRequired,
                 onShowToast = viewModel::emitToast
             )
+
+            // One-time startup Adhan Reliability Prompt if Battery Optimization or Exact Alarms need granting
+            if (showReliabilityPrompt && !permissionsStatus.adhanReliabilityReady && !fajrAlarmRinging) {
+                AdhanReliabilityStartupDialog(
+                    status = permissionsStatus,
+                    onDisableBatteryOptimization = {
+                        PermissionsHelper.openIgnoreBatteryOptimizationSettings(context)
+                    },
+                    onGrantExactAlarms = {
+                        PermissionsHelper.openExactAlarmSettings(context)
+                    },
+                    onDismiss = viewModel::dismissReliabilityPrompt
+                )
+            }
         }
     }
+}
+
+@Composable
+private fun AdhanReliabilityStartupDialog(
+    status: AppPermissionsStatus,
+    onDisableBatteryOptimization: () -> Unit,
+    onGrantExactAlarms: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                imageVector = Icons.Default.NotificationsActive,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary
+            )
+        },
+        title = {
+            Text(
+                text = "ضمان رنين الأذان في وقته بالثانية",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.ExtraBold
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "حتى يعمل الأذان بدقة في الليل أو بعد إغلاق التطبيق من التطبيقات الحديثة، يُنصح بتفعيل الإذن التالي:",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                if (!status.batteryOptimizationIgnored) {
+                    Button(
+                        onClick = onDisableBatteryOptimization,
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = Color.White
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("startup_dialog_battery_opt_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.BatteryChargingFull,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("إلغاء تحسين البطارية", fontWeight = FontWeight.Bold)
+                    }
+                }
+                if (!status.exactAlarmsGranted && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    OutlinedButton(
+                        onClick = onGrantExactAlarms,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("startup_dialog_exact_alarm_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Alarm,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("تفعيل المنبهات الدقيقة", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.testTag("startup_dialog_reliability_later_button")
+            ) {
+                Text("لاحقاً", fontWeight = FontWeight.Bold)
+            }
+        }
+    )
 }
 
 @Composable

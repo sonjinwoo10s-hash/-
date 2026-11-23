@@ -33,16 +33,22 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Alarm
+import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MyLocation
+import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.SystemUpdate
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -52,12 +58,14 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -86,7 +94,11 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.example.BuildConfig
 import com.example.PermissionsOnboardingActivity
+import com.example.alarm.AppPermissionsStatus
+import com.example.alarm.PermissionsHelper
 import com.example.alarm.PrayerLogStats
+import com.example.alarm.PrayerScheduleStore
+import com.example.alarm.PrayerTimeAdjustments
 import com.example.data.local.OfflineIslamicData
 import com.example.data.model.CalculatedWakeupTime
 import com.example.data.model.FajrAlarmSettings
@@ -109,6 +121,8 @@ fun ToolsScreen(
     globalLocation: GlobalLocationConfig,
     prayerLogStats: PrayerLogStats,
     hijriDayOffset: Int,
+    prayerTimeAdjustments: PrayerTimeAdjustments,
+    permissionsStatus: AppPermissionsStatus,
     activeMuezzin: MuezzinItem,
     fajrAlarmSettings: FajrAlarmSettings,
     fajrWakeupTime: CalculatedWakeupTime,
@@ -124,6 +138,9 @@ fun ToolsScreen(
     onImportPrayerBackupJson: (String) -> Unit,
     onOpenGlobalLocationSettings: () -> Unit,
     onSelectHijriDayOffset: (Int) -> Unit,
+    onSetGlobalPrayerTimeAdjustment: (Int) -> Unit,
+    onSetPerPrayerTimeAdjustment: (String, Int) -> Unit,
+    onResetPrayerTimeAdjustments: () -> Unit,
     onGpsLocation: (Location) -> Unit,
     onHeadingChanged: (Float) -> Unit,
     onToggleCompassSensor: (Boolean) -> Unit,
@@ -140,6 +157,7 @@ fun ToolsScreen(
     val view = LocalView.current
     val islamic = LocalIslamicColors.current
     var hijriOffsetMenuExpanded by remember { mutableStateOf(false) }
+    var timeAdjustmentsExpanded by remember { mutableStateOf(false) }
 
     // Zero-permission Android SAF launchers for manual JSON backup export/import
     val exportBackupLauncher = rememberLauncherForActivityResult(
@@ -240,6 +258,23 @@ fun ToolsScreen(
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
+        // 0. Adhan Reliability Banner (shown prominently whenever Battery Optimization or Exact Alarm needs attention)
+        if (!permissionsStatus.adhanReliabilityReady) {
+            item(key = "adhan_reliability_banner") {
+                AdhanReliabilityBannerCard(
+                    permissionsStatus = permissionsStatus,
+                    onDisableBatteryOptimization = {
+                        performKeyTapHaptic(view)
+                        PermissionsHelper.openIgnoreBatteryOptimizationSettings(context)
+                    },
+                    onGrantExactAlarms = {
+                        performKeyTapHaptic(view)
+                        PermissionsHelper.openExactAlarmSettings(context)
+                    }
+                )
+            }
+        }
+
         // 0A. Smart Fajr Alarm Card
         item(key = "fajr_alarm_entry") {
             Card(
@@ -690,6 +725,82 @@ fun ToolsScreen(
                         color = islamic.border
                     )
 
+                    // Manual Prayer Time Adjustment (±15 min global & per-prayer)
+                    val adjSummaryText = when {
+                        !prayerTimeAdjustments.hasAnyAdjustment -> "0 د (تلقائي)"
+                        prayerTimeAdjustments.globalMinutes != 0 && prayerTimeAdjustments.perPrayerMinutes.isEmpty() -> {
+                            val g = prayerTimeAdjustments.globalMinutes
+                            if (g > 0) "عام +$g د" else "عام $g د"
+                        }
+                        else -> "تعديل مخصّص"
+                    }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable {
+                                performKeyTapHaptic(view)
+                                timeAdjustmentsExpanded = !timeAdjustmentsExpanded
+                            }
+                            .padding(vertical = 2.dp)
+                            .testTag("settings_manual_time_adjustment_row"),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "تعديل مواقيت الصلاة يدوياً (±)",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = "تقديم أو تأخير الدقائق (±15 دقيقة) للجميع أو لكل صلاة",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = islamic.textMuted
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        OutlinedButton(
+                            onClick = {
+                                performKeyTapHaptic(view)
+                                timeAdjustmentsExpanded = !timeAdjustmentsExpanded
+                            },
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.testTag("settings_manual_time_adjustment_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Tune,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(adjSummaryText, style = MaterialTheme.typography.labelMedium)
+                        }
+                    }
+
+                    AnimatedVisibility(visible = timeAdjustmentsExpanded) {
+                        ManualPrayerTimeAdjustmentPanel(
+                            adjustments = prayerTimeAdjustments,
+                            onSetGlobal = { delta ->
+                                performKeyTapHaptic(view)
+                                onSetGlobalPrayerTimeAdjustment(delta)
+                            },
+                            onSetPerPrayer = { key, delta ->
+                                performKeyTapHaptic(view)
+                                onSetPerPrayerTimeAdjustment(key, delta)
+                            },
+                            onResetAll = {
+                                performKeyTapHaptic(view)
+                                onResetPrayerTimeAdjustments()
+                            }
+                        )
+                    }
+
+                    HorizontalDivider(
+                        modifier = Modifier.padding(vertical = 10.dp),
+                        color = islamic.border
+                    )
+
                     // Hijri Date Adjustment Row (-2, -1, 0, +1, +2)
                     Row(
                         modifier = Modifier
@@ -887,35 +998,116 @@ fun ToolsScreen(
                         color = islamic.border
                     )
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("settings_adhan_reliability_section"),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "أذونات الأذان والتنبيهات",
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            Text(
-                                text = "الإشعارات، المنبهات الدقيقة، البطارية، والموقع",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = islamic.textMuted
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(8.dp))
-                        OutlinedButton(
-                            onClick = {
-                                val intent = Intent(context, PermissionsOnboardingActivity::class.java).apply {
-                                    putExtra(PermissionsOnboardingActivity.EXTRA_FROM_SETTINGS, true)
-                                }
-                                context.startActivity(intent)
-                            },
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier.testTag("open_permissions_setup_button")
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text("إدارة")
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "أذونات الأذان وموثوقية الخلفية",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = if (permissionsStatus.adhanReliabilityReady) {
+                                        "استثناء البطارية والمنبه الدقيق مفعّلان — الأذان يعمل في وقته بالثانية ✓"
+                                    } else {
+                                        "الإشعارات، المنبهات الدقيقة، استثناء البطارية، والموقع"
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (permissionsStatus.adhanReliabilityReady) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        islamic.textMuted
+                                    }
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            OutlinedButton(
+                                onClick = {
+                                    val intent = Intent(context, PermissionsOnboardingActivity::class.java).apply {
+                                        putExtra(PermissionsOnboardingActivity.EXTRA_FROM_SETTINGS, true)
+                                    }
+                                    context.startActivity(intent)
+                                },
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.testTag("open_permissions_setup_button")
+                            ) {
+                                Text("إدارة")
+                            }
+                        }
+
+                        if (!permissionsStatus.adhanReliabilityReady) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                if (!permissionsStatus.batteryOptimizationIgnored) {
+                                    Button(
+                                        onClick = {
+                                            performKeyTapHaptic(view)
+                                            PermissionsHelper.openIgnoreBatteryOptimizationSettings(context)
+                                        },
+                                        shape = RoundedCornerShape(12.dp),
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = islamic.goldSoft,
+                                            contentColor = islamic.goldText
+                                        ),
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .testTag("settings_disable_battery_opt_button")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.BatteryChargingFull,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            text = "استثناء البطارية",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                                if (!permissionsStatus.exactAlarmsGranted && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                                    Button(
+                                        onClick = {
+                                            performKeyTapHaptic(view)
+                                            PermissionsHelper.openExactAlarmSettings(context)
+                                        },
+                                        shape = RoundedCornerShape(12.dp),
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = islamic.emeraldSoft,
+                                            contentColor = MaterialTheme.colorScheme.primary
+                                        ),
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .testTag("settings_grant_exact_alarm_button")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Alarm,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            text = "المنبه الدقيق",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -1440,4 +1632,283 @@ private fun GuideAccordionCard(
             }
         }
     }
+}
+
+@Composable
+private fun AdhanReliabilityBannerCard(
+    permissionsStatus: AppPermissionsStatus,
+    onDisableBatteryOptimization: () -> Unit,
+    onGrantExactAlarms: () -> Unit
+) {
+    val islamic = LocalIslamicColors.current
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("adhan_reliability_banner_card"),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = islamic.goldSoft.copy(alpha = 0.65f)),
+        border = BorderStroke(1.2.dp, islamic.gold)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(islamic.gold.copy(alpha = 0.25f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.WarningAmber,
+                        contentDescription = "تنبيه موثوقية الأذان",
+                        tint = islamic.goldText
+                    )
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "اضمن رنين الأذان بدقة في الليل والخلفية",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "بعض الهواتف تؤخر الأذان في وضع السكون. فعّل الأذونات التالية لضمان الرنين بالثانية حتى بعد إغلاق التطبيق:",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = islamic.textMuted
+                    )
+                }
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (!permissionsStatus.batteryOptimizationIgnored) {
+                    Button(
+                        onClick = onDisableBatteryOptimization,
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = Color.White
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("banner_disable_battery_opt_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.BatteryChargingFull,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "إلغاء تحسين البطارية (مهم للأذان ليلاً)",
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+                if (!permissionsStatus.exactAlarmsGranted && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    OutlinedButton(
+                        onClick = onGrantExactAlarms,
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("banner_grant_exact_alarm_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Alarm,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "السماح بالمنبهات الدقيقة (Android 12+)",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ManualPrayerTimeAdjustmentPanel(
+    adjustments: PrayerTimeAdjustments,
+    onSetGlobal: (Int) -> Unit,
+    onSetPerPrayer: (String, Int) -> Unit,
+    onResetAll: () -> Unit
+) {
+    val islamic = LocalIslamicColors.current
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 10.dp)
+            .testTag("manual_prayer_adjustment_panel"),
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        border = BorderStroke(1.dp, islamic.border)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            MinuteOffsetStepperRow(
+                title = "تعديل عام (جميع الصلوات)",
+                subtitle = "يُضاف لكل صلاة من -15 إلى +15 دقيقة",
+                value = adjustments.globalMinutes,
+                testTagPrefix = "adj_global",
+                onValueChange = onSetGlobal
+            )
+
+            HorizontalDivider(color = islamic.border)
+
+            Text(
+                text = "تعديل مخصّص لكل صلاة:",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary
+            )
+
+            PrayerScheduleStore.prayerOrder.forEach { (key, arabicName) ->
+                val prayerDelta = adjustments.prayerOffsetMinutes(key)
+                val totalEffective = adjustments.effectiveOffsetMinutes(key)
+                val subtitle = if (adjustments.globalMinutes != 0 && prayerDelta != 0) {
+                    "الإجمالي الفعلي: ${formatOffsetBadge(totalEffective)}"
+                } else {
+                    null
+                }
+                MinuteOffsetStepperRow(
+                    title = "صلاة $arabicName",
+                    subtitle = subtitle,
+                    value = prayerDelta,
+                    testTagPrefix = "adj_${key.lowercase()}",
+                    onValueChange = { onSetPerPrayer(key, it) }
+                )
+            }
+
+            if (adjustments.hasAnyAdjustment) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    TextButton(
+                        onClick = onResetAll,
+                        modifier = Modifier.testTag("reset_prayer_time_adjustments_button")
+                    ) {
+                        Text(
+                            text = "إعادة الكل إلى 0 (الافتراضي)",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MinuteOffsetStepperRow(
+    title: String,
+    subtitle: String?,
+    value: Int,
+    testTagPrefix: String,
+    onValueChange: (Int) -> Unit
+) {
+    val islamic = LocalIslamicColors.current
+    val minVal = PrayerScheduleStore.MIN_TIME_ADJUSTMENT_MINUTES
+    val maxVal = PrayerScheduleStore.MAX_TIME_ADJUSTMENT_MINUTES
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            if (!subtitle.isNullOrBlank()) {
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = islamic.textMuted
+                )
+            }
+        }
+
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            IconButton(
+                onClick = { if (value > minVal) onValueChange(value - 1) },
+                enabled = value > minVal,
+                modifier = Modifier
+                    .size(48.dp)
+                    .testTag("${testTagPrefix}_minus")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Remove,
+                    contentDescription = "إنقاص دقيقة واحدة لـ $title",
+                    tint = if (value > minVal) MaterialTheme.colorScheme.primary else islamic.textMuted.copy(alpha = 0.4f)
+                )
+            }
+
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = if (value != 0) islamic.emeraldSoft else MaterialTheme.colorScheme.surface,
+                border = BorderStroke(
+                    1.dp,
+                    if (value != 0) MaterialTheme.colorScheme.primary.copy(alpha = 0.4f) else islamic.border
+                )
+            ) {
+                Text(
+                    text = formatOffsetBadge(value),
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = if (value != 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .width(56.dp)
+                        .padding(vertical = 6.dp)
+                )
+            }
+
+            IconButton(
+                onClick = { if (value < maxVal) onValueChange(value + 1) },
+                enabled = value < maxVal,
+                modifier = Modifier
+                    .size(48.dp)
+                    .testTag("${testTagPrefix}_plus")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Add,
+                    contentDescription = "زيادة دقيقة واحدة لـ $title",
+                    tint = if (value < maxVal) MaterialTheme.colorScheme.primary else islamic.textMuted.copy(alpha = 0.4f)
+                )
+            }
+        }
+    }
+}
+
+private fun formatOffsetBadge(minutes: Int): String = when {
+    minutes > 0 -> "+$minutes د"
+    minutes < 0 -> "$minutes د"
+    else -> "0 د"
 }
