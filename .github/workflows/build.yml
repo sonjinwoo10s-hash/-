@@ -43,11 +43,19 @@ jobs:
             echo "Error: GitHub Secret SIGNING_KEY_BASE64 is missing or empty."
             exit 1
           fi
-          echo "${SIGNING_KEY_BASE64}" | tr -d '\r\n ' | base64 --decode > app/rafiq-key.jks
+          CLEAN_B64=$(printf '%s' "${SIGNING_KEY_BASE64}" | tr -d '[:space:]' | tr '_-' '/+' | tr -cd 'A-Za-z0-9+/=')
+          MOD=$(( ${#CLEAN_B64} % 4 ))
+          if [ "$MOD" -eq 2 ]; then
+            CLEAN_B64="${CLEAN_B64}=="
+          elif [ "$MOD" -eq 3 ]; then
+            CLEAN_B64="${CLEAN_B64}="
+          fi
+          printf '%s' "${CLEAN_B64}" | base64 -d > app/rafiq-key.jks
           if [ ! -s "app/rafiq-key.jks" ]; then
             echo "Error: Failed to decode app/rafiq-key.jks from SIGNING_KEY_BASE64."
             exit 1
           fi
+          keytool -list -keystore app/rafiq-key.jks -storepass "${RAFIQ_STORE_PASSWORD:-Rafiq2026!}" -alias "${RAFIQ_KEY_ALIAS:-rafiq}" >/dev/null
           ls -la app/rafiq-key.jks
 
       - name: Build Signed APK
