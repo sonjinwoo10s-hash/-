@@ -94,6 +94,7 @@ import com.example.data.model.PrayerTimesUiState
 import com.example.data.model.QuranBookmark
 import com.example.data.model.WorshipTask
 import com.example.data.repository.GlobalLocationConfig
+import com.example.ui.components.RamadanCrescentCard
 import com.example.ui.theme.AmiriFontFamily
 import com.example.ui.theme.DeepGreen
 import com.example.ui.theme.EmeraldGreen
@@ -104,6 +105,8 @@ import java.util.Calendar
 @Composable
 fun HomeScreen(
     globalLocation: GlobalLocationConfig,
+    hijriDayOffset: Int,
+    maghribAdjustmentMinutes: Int,
     prayerState: PrayerTimesUiState,
     pendingQadaaCount: Int,
     activeMuezzin: MuezzinItem,
@@ -163,7 +166,17 @@ fun HomeScreen(
             )
         }
 
-        // 2. Quick Continue Reading Banner
+        // 2. Ramadan Countdown & Live Crescent Sighting Card (isolated from 1-second prayer ticks)
+        item(key = "ramadan_crescent_card") {
+            RamadanCrescentCard(
+                globalLocation = globalLocation,
+                hijriDayOffset = hijriDayOffset,
+                maghribAdjustmentMinutes = maghribAdjustmentMinutes,
+                onShowToast = onShowToast
+            )
+        }
+
+        // 3. Quick Continue Reading Banner
         if (bookmark != null) {
             item(key = "continue_reading") {
                 ContinueReadingBanner(
@@ -622,24 +635,27 @@ private fun PrayerHeroCard(
 
                 Spacer(modifier = Modifier.height(10.dp))
 
-                // 5 Daily Prayers Grid with subtle interactive Prayer Log checkmarks (Today & Past; hidden for Future)
+                // 5 Daily Prayers Grid with real-time time-gated Prayer Log checkboxes (Past/Entered unlocked; Upcoming/Future locked)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     prayerState.prayers.forEach { entry ->
                         val isFajr = entry.key == "Fajr"
-                        val showCheckmark = !prayerState.isSelectedDateFuture
+                        val isLocked = entry.isLockedFuture || prayerState.isSelectedDateFuture
+                        val isChecked = !isLocked && entry.isPerformed
                         val isPastMissed = prayerState.isSelectedDatePast && !entry.isPerformed
                         val bgColor = when {
                             entry.isNext -> SoftGold.copy(alpha = 0.28f)
-                            showCheckmark && entry.isPerformed -> Color(0xFF16A34A).copy(alpha = 0.24f)
+                            isChecked -> Color(0xFF16A34A).copy(alpha = 0.24f)
                             isPastMissed -> Color.Black.copy(alpha = 0.22f)
+                            isLocked -> Color.White.copy(alpha = 0.08f)
                             else -> Color.White.copy(alpha = 0.12f)
                         }
                         val borderColor = when {
                             entry.isNext -> Color(0xFFE7C875)
-                            showCheckmark && entry.isPerformed -> Color(0xFF4ADE80).copy(alpha = 0.7f)
+                            isChecked -> Color(0xFF4ADE80).copy(alpha = 0.7f)
+                            isLocked -> Color.White.copy(alpha = 0.10f)
                             else -> Color.White.copy(alpha = 0.12f)
                         }
                         Column(
@@ -648,19 +664,8 @@ private fun PrayerHeroCard(
                                 .clip(RoundedCornerShape(12.dp))
                                 .background(bgColor)
                                 .border(1.dp, borderColor, RoundedCornerShape(12.dp))
-                                .then(
-                                    if (showCheckmark) {
-                                        Modifier
-                                            .testTag("home_prayer_cell_${entry.key}")
-                                            .clickable { onTogglePrayerPerformed(entry.key) }
-                                    } else if (isFajr) {
-                                        Modifier
-                                            .testTag("home_fajr_prayer_cell")
-                                            .clickable(onClick = onOpenFajrAlarm)
-                                    } else {
-                                        Modifier.testTag("home_prayer_cell_${entry.key}")
-                                    }
-                                )
+                                .testTag("home_prayer_cell_${entry.key}")
+                                .clickable { onTogglePrayerPerformed(entry.key) }
                                 .padding(vertical = 8.dp, horizontal = 2.dp),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
@@ -668,7 +673,11 @@ private fun PrayerHeroCard(
                                 Text(
                                     text = entry.arabicName,
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = if (isPastMissed) Color.White.copy(alpha = 0.65f) else Color.White.copy(alpha = 0.92f),
+                                    color = when {
+                                        isPastMissed -> Color.White.copy(alpha = 0.65f)
+                                        isLocked && !entry.isNext -> Color.White.copy(alpha = 0.72f)
+                                        else -> Color.White.copy(alpha = 0.92f)
+                                    },
                                     fontWeight = FontWeight.SemiBold,
                                     maxLines = 1
                                 )
@@ -693,44 +702,59 @@ private fun PrayerHeroCard(
                                     color = when {
                                         entry.isNext -> Color(0xFFF6DC97)
                                         isPastMissed -> Color.White.copy(alpha = 0.68f)
+                                        isLocked -> Color.White.copy(alpha = 0.75f)
                                         else -> Color.White
                                     },
                                     maxLines = 1
                                 )
                             }
-                            if (showCheckmark) {
-                                Spacer(modifier = Modifier.height(5.dp))
-                                Box(
-                                    modifier = Modifier
-                                        .size(20.dp)
-                                        .clip(CircleShape)
-                                        .background(
-                                            when {
-                                                entry.isPerformed -> Color(0xFF16A34A)
-                                                prayerState.isSelectedDatePast -> Color.White.copy(alpha = 0.08f)
-                                                else -> Color.White.copy(alpha = 0.14f)
-                                            }
-                                        )
-                                        .border(
-                                            width = 1.dp,
-                                            color = when {
-                                                entry.isPerformed -> Color(0xFF86EFAC)
-                                                prayerState.isSelectedDatePast -> Color.White.copy(alpha = 0.28f)
-                                                else -> Color.White.copy(alpha = 0.42f)
-                                            },
-                                            shape = CircleShape
-                                        )
-                                        .testTag("prayer_log_check_${entry.key}"),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    if (entry.isPerformed) {
+                            Spacer(modifier = Modifier.height(5.dp))
+                            Box(
+                                modifier = Modifier
+                                    .size(20.dp)
+                                    .alpha(if (isLocked) 0.55f else 1f)
+                                    .clip(CircleShape)
+                                    .background(
+                                        when {
+                                            isChecked -> Color(0xFF16A34A)
+                                            isLocked -> Color.Black.copy(alpha = 0.20f)
+                                            prayerState.isSelectedDatePast -> Color.White.copy(alpha = 0.08f)
+                                            else -> Color.White.copy(alpha = 0.14f)
+                                        }
+                                    )
+                                    .border(
+                                        width = 1.dp,
+                                        color = when {
+                                            isChecked -> Color(0xFF86EFAC)
+                                            isLocked -> Color.White.copy(alpha = 0.24f)
+                                            prayerState.isSelectedDatePast -> Color.White.copy(alpha = 0.28f)
+                                            else -> Color.White.copy(alpha = 0.42f)
+                                        },
+                                        shape = CircleShape
+                                    )
+                                    .testTag(
+                                        if (isLocked) "prayer_log_locked_${entry.key}" else "prayer_log_check_${entry.key}"
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                when {
+                                    isChecked -> {
                                         Icon(
                                             imageVector = Icons.Default.Check,
                                             contentDescription = "تم أداء ${entry.arabicName}",
                                             tint = Color.White,
                                             modifier = Modifier.size(13.dp)
                                         )
-                                    } else if (prayerState.isSelectedDatePast) {
+                                    }
+                                    isLocked -> {
+                                        Icon(
+                                            imageVector = Icons.Default.Lock,
+                                            contentDescription = "لم يدخل وقت ${entry.arabicName} بعد",
+                                            tint = Color.White.copy(alpha = 0.78f),
+                                            modifier = Modifier.size(11.dp)
+                                        )
+                                    }
+                                    prayerState.isSelectedDatePast -> {
                                         Box(
                                             modifier = Modifier
                                                 .size(5.dp)

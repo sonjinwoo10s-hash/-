@@ -18,7 +18,8 @@ data class PrayerEntry(
     val time24: String,
     val formatted12: String,
     val isNext: Boolean = false,
-    val isPerformed: Boolean = false
+    val isPerformed: Boolean = false,
+    val isLockedFuture: Boolean = false
 )
 
 data class PrayerTimesUiState(
@@ -34,6 +35,7 @@ data class PrayerTimesUiState(
     val performedCount: Int = 0,
     val statusNote: String = "توقيت الهيئة المصرية العامة للمساحة",
     val prayers: List<PrayerEntry> = emptyList(),
+    val lockedTodayPrayerKeys: Set<String> = emptySet(),
     val nextPrayerName: String = "---",
     val countdownText: String = "--:--:--",
     val islamicMidnightFormatted: String = "--:--",

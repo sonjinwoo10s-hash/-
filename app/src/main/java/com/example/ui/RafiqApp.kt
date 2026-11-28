@@ -379,6 +379,9 @@ fun RafiqApp(viewModel: RafiqViewModel) {
                             when (selectedTab) {
                                 RafiqTab.HOME -> HomeScreen(
                                     globalLocation = globalLocation,
+                                    hijriDayOffset = hijriDayOffset,
+                                    maghribAdjustmentMinutes = prayerTimeAdjustments.globalMinutes +
+                                        (prayerTimeAdjustments.perPrayerMinutes["Maghrib"] ?: 0),
                                     prayerState = prayerState,
                                     pendingQadaaCount = pendingQadaaItems.size,
                                     activeMuezzin = activeDefaultMuezzin,
@@ -653,6 +656,7 @@ fun RafiqApp(viewModel: RafiqViewModel) {
                     stats = prayerLogStats,
                     pendingQadaaItems = pendingQadaaItems,
                     logRevision = prayerLogRevision,
+                    lockedTodayPrayerKeys = prayerState.lockedTodayPrayerKeys,
                     onTogglePrayerForDate = viewModel::togglePrayerPerformedForDate,
                     onMarkQadaaDone = viewModel::markQadaaDone,
                     onToggleSunnahHabit = viewModel::toggleSunnahHabitForDate,

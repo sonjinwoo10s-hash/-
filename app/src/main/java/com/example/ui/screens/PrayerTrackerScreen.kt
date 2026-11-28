@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.LocalFireDepartment
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.NotificationsNone
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -61,6 +62,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -99,6 +101,7 @@ fun PrayerTrackerScreen(
     stats: PrayerLogStats,
     pendingQadaaItems: List<QadaaItem>,
     logRevision: Long,
+    lockedTodayPrayerKeys: Set<String> = emptySet(),
     onTogglePrayerForDate: (dateKey: String, prayerKey: String) -> Unit,
     onMarkQadaaDone: (dateKey: String, prayerKey: String) -> Unit,
     onToggleSunnahHabit: (dateKey: String, habitKey: String) -> Unit,
@@ -438,6 +441,7 @@ fun PrayerTrackerScreen(
                             item(key = "selected_day_fard") {
                                 SelectedDayPrayerChecklistCard(
                                     cell = selectedDayCell,
+                                    lockedPrayerKeys = if (selectedDayCell.isToday) lockedTodayPrayerKeys else emptySet(),
                                     onTogglePrayer = { pKey ->
                                         performKeyTapHaptic(view)
                                         onTogglePrayerForDate(selectedDayCell.dateKey, pKey)
@@ -846,6 +850,7 @@ private fun LegendDot(color: Color, label: String) {
 @Composable
 private fun SelectedDayPrayerChecklistCard(
     cell: MonthDayCell,
+    lockedPrayerKeys: Set<String> = emptySet(),
     onTogglePrayer: (String) -> Unit
 ) {
     val islamic = LocalIslamicColors.current
@@ -898,7 +903,8 @@ private fun SelectedDayPrayerChecklistCard(
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 PrayerLogStore.prayerOrder.forEach { (pKey, pArabic) ->
-                    val done = cell.performedKeys.contains(pKey) || cell.madeUpKeys.contains(pKey)
+                    val isLocked = lockedPrayerKeys.contains(pKey)
+                    val done = !isLocked && (cell.performedKeys.contains(pKey) || cell.madeUpKeys.contains(pKey))
                     Surface(
                         shape = RoundedCornerShape(12.dp),
                         color = if (done) Color(0xFF15803D) else islamic.cardAlt,
@@ -908,6 +914,7 @@ private fun SelectedDayPrayerChecklistCard(
                         ),
                         modifier = Modifier
                             .weight(1f)
+                            .alpha(if (isLocked) 0.55f else 1f)
                             .clip(RoundedCornerShape(12.dp))
                             .clickable { onTogglePrayer(pKey) }
                             .testTag("tracker_day_prayer_${cell.dateKey}_$pKey")
@@ -917,9 +924,9 @@ private fun SelectedDayPrayerChecklistCard(
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             Icon(
-                                imageVector = Icons.Default.Check,
-                                contentDescription = pArabic,
-                                tint = if (done) Color.White else islamic.textMuted.copy(alpha = 0.45f),
+                                imageVector = if (isLocked) Icons.Default.Lock else Icons.Default.Check,
+                                contentDescription = if (isLocked) "لم يدخل وقت $pArabic بعد" else pArabic,
+                                tint = if (done) Color.White else islamic.textMuted.copy(alpha = 0.55f),
                                 modifier = Modifier.size(16.dp)
                             )
                             Spacer(modifier = Modifier.height(3.dp))

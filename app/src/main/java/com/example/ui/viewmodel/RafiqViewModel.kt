@@ -1415,8 +1415,12 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun togglePrayerPerformedForDate(dateKey: String, prayerKey: String) {
+        val nowMillis = System.currentTimeMillis()
         val today = AstronomicalPrayerCalculator.todayDateKey()
-        if (dateKey > today) return
+        if (isPrayerLockedForDate(dateKey, prayerKey, nowMillis)) {
+            emitToast("لا يمكن تسجيل الصلاة قبل دخول وقتها")
+            return
+        }
         val appCtx = getApplication<Application>().applicationContext
         val updatedSet = PrayerLogStore.togglePrayer(appCtx, dateKey, prayerKey)
         refreshPrayerTrackerState()
@@ -1751,15 +1755,25 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
             PrayerLogStore.getPerformedPrayers(appCtx, selectedPrayerDateKey)
         }
 
+        val lockedTodayKeys = prayerMeta.mapNotNull { (key, _) ->
+            if (isPrayerLockedForDate(currentDateKey, key, now.timeInMillis)) key else null
+        }.toSet()
+
         val entries = prayerMeta.map { (key, arName) ->
             val raw = displayTimings[key] ?: "--:--"
+            val isLocked = when {
+                isFuture -> true
+                isPast -> false
+                else -> lockedTodayKeys.contains(key)
+            }
             PrayerEntry(
                 key = key,
                 arabicName = arName,
                 time24 = raw,
                 formatted12 = format12HourArabic(raw),
                 isNext = isToday && key == nextKey,
-                isPerformed = performedForSelected.contains(key)
+                isPerformed = !isLocked && performedForSelected.contains(key),
+                isLockedFuture = isLocked
             )
         }
 
@@ -1784,13 +1798,14 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
 
             state.copy(
                 prayers = entries,
+                lockedTodayPrayerKeys = lockedTodayKeys,
                 nextPrayerName = nextArabic,
                 countdownText = countdown,
                 selectedDateKey = selectedPrayerDateKey,
                 isSelectedDateToday = isToday,
                 isSelectedDateFuture = isFuture,
                 isSelectedDatePast = isPast,
-                performedCount = performedForSelected.size,
+                performedCount = entries.count { it.isPerformed },
                 islamicMidnightFormatted = updatedNight?.islamicMidnightFormatted ?: state.islamicMidnightFormatted,
                 lastThirdNightFormatted = updatedNight?.lastThirdNightFormatted ?: state.lastThirdNightFormatted,
                 activeIqamaCountdown = activeIqama
@@ -1820,11 +1835,23 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun isPrayerStillInFuture(taskId: String, nowMillis: Long): Boolean {
-        val prayerKey = trackerPrayerKeyByTaskId[taskId] ?: return false
+    private fun isPrayerLockedForDate(
+        dateKey: String,
+        prayerKey: String,
+        nowMillis: Long = System.currentTimeMillis()
+    ): Boolean {
+        val today = AstronomicalPrayerCalculator.todayDateKey()
+        if (dateKey > today) return true
+        if (dateKey < today) return false
         val time24 = currentTimings24[prayerKey] ?: return false
         val prayerMillis = PrayerScheduleStore.parseTodayMillis(time24, nowMillis) ?: return false
         return nowMillis < prayerMillis
+    }
+
+    private fun isPrayerStillInFuture(taskId: String, nowMillis: Long): Boolean {
+        val prayerKey = trackerPrayerKeyByTaskId[taskId] ?: return false
+        val today = AstronomicalPrayerCalculator.todayDateKey()
+        return isPrayerLockedForDate(today, prayerKey, nowMillis)
     }
 
     private fun refreshFuturePrayerLocks(nowMillis: Long) {
@@ -1848,7 +1875,7 @@ class RafiqViewModel(application: Application) : AndroidViewModel(application) {
         val nowMillis = System.currentTimeMillis()
         val target = _worshipTasks.value.find { it.id == taskId } ?: return
         if (target.isLockedFuture || isPrayerStillInFuture(taskId, nowMillis)) {
-            emitToast("لم يحن وقت ${target.label} بعد")
+            emitToast("لا يمكن تسجيل الصلاة قبل دخول وقتها")
             return
         }
         val updated = _worshipTasks.value.map {
